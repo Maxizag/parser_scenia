@@ -1,6 +1,20 @@
+# Виртуальное окружение
 venv/
+
+# Переменные окружения
 .env
+
+# Базы и сессии
 *.db
 *.session
 *.session-journal
+
+# Кэш Python
 __pycache__/
+*.pyc
+*.pyo
+
+# IDE и логи
+.vscode/
+.idea/
+*.log
