@@ -2,12 +2,12 @@ import asyncio
 import logging
 import sqlite3
 import os
-import re # Для команды /ban: поиск ID в тексте
+import re 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 import openai
 from telethon.utils import get_peer_id
-from telethon.tl.types import User # Для проверки типа Entity
+from telethon.tl.types import User, Channel, Chat # Добавил Channel, Chat для проверки Entity
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
@@ -156,6 +156,11 @@ def add_source(chat_id, chat_title):
     except Exception as e:
         log.error(f"Error adding source: {e}")
         return False
+
+def delete_source(chat_id): # <-- НОВАЯ ФУНКЦИЯ
+    cursor.execute("DELETE FROM sources WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    return cursor.rowcount > 0
 
 def is_seen(msg_key):
     cursor.execute("SELECT 1 FROM seen_messages WHERE msg_key = ?", (msg_key,))
@@ -341,7 +346,7 @@ async def on_message(evt: events.NewMessage.Event):
     
     if ai_passed:
         try:
-            # --- НОВАЯ ЛОГИКА ПЕРЕСЫЛКИ: ФОРМАТИРОВАНИЕ ТЕКСТА ---
+            # --- ЛОГИКА ПЕРЕСЫЛКИ: ФОРМАТИРОВАНИЕ ТЕКСТА ---
             
             # 1. Получаем необходимые данные (асинхронные вызовы)
             chat_title = await get_chat_title(evt.chat_id)
@@ -357,7 +362,7 @@ async def on_message(evt: events.NewMessage.Event):
             
             # Форматирование отправителя: всегда включаем ID для команды /ban
             sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
-            sender_line = f"Отправитель: {sender_display}\nUID: `{sender_info['id']}`" # UID: `...` для легкого парсинга
+            sender_line = f"Отправитель: {sender_display}\nUID: `{sender_info['id']}`" 
             
             separator = "—" * 20
             
@@ -374,8 +379,8 @@ async def on_message(evt: events.NewMessage.Event):
             sent_msg = await client.send_message(
                 TARGET_CHAT_ID, 
                 final_text, 
-                link_preview=False, # Отключаем превью, чтобы не засорять чат
-                parse_mode='md' # Используем Markdown для жирного шрифта и ссылок
+                link_preview=False, 
+                parse_mode='md' 
             )
             
             # 4. Сохраняем причину для команды /why
@@ -383,7 +388,6 @@ async def on_message(evt: events.NewMessage.Event):
 
             mark_seen(msg_key)
             log.info(f"✓ Formatted message sent from {evt.chat_id}: {text[:50]}... | AI: {ai_verdict}")
-            # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
             
         except Exception as e:
             log.error(f"Failed to process message: {e}")
@@ -393,11 +397,29 @@ async def on_message(evt: events.NewMessage.Event):
 
     await asyncio.sleep(0.6)
 
-# ====== Команды (только для администратора) ======
+# ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ /WHY (РАБОТАЕТ В ОБОИХ ЧАТАХ) ======
+@client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/why'))
+async def on_command_why(evt: events.NewMessage.Event):
+    # Проверка: только администратор (или основной владелец из .env) может использовать команды
+    if not is_admin(evt.sender_id):
+        return
+    
+    if evt.reply_to_msg_id:
+        target_msg_id = evt.reply_to_msg_id
+        reason = get_forward_reason(target_msg_id)
+        
+        if reason:
+            await evt.reply(f"🔍 **Причина пересылки**:\n{reason}", parse_mode='md')
+        else:
+            await evt.reply("⚠️ Не удалось найти причину пересылки для этого сообщения. Убедитесь, что вы отвечаете на сообщение, которое **только что** переслал бот.", parse_mode='md')
+    else:
+        await evt.reply("Используйте /why, ответив на пересланное сообщение в этом чате.", parse_mode='md')
+
+# ====== ОСНОВНОЙ ОБРАБОТЧИК КОМАНД ======
 @client.on(events.NewMessage(chats=CONTROL_CHAT_ID, pattern=r'^/'))
 async def on_command(evt: events.NewMessage.Event):
     # Проверка: только администратор (или основной владелец из .env) может использовать команды
-    if not is_admin(evt.sender_id): # <--- НОВАЯ ПРОВЕРКА
+    if not is_admin(evt.sender_id): 
         log.warning(f"⚠️ Unauthorized command attempt from user {evt.sender_id}")
         await evt.reply("❌ У вас нет прав для управления ботом")
         return
@@ -463,7 +485,7 @@ async def on_command(evt: events.NewMessage.Event):
         if len(parts) < 2:
             sources = list_sources()
             await evt.reply(f"📢 Источники ({len(sources)}):\n" + 
-                          "\n".join(f"• {title} (ID: {cid})" for cid, title in sources) if sources else "Список пуст")
+                          "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
             return
         
         subcmd = parts[1].lower()
@@ -476,15 +498,18 @@ async def on_command(evt: events.NewMessage.Event):
                 entity = await client.get_entity(chat_input) 
                 
                 # 2. Проверка, что это группа/канал, а не просто пользователь
-                from telethon.tl.types import Channel, Chat, User
-                
                 if isinstance(entity, User):
-                    await evt.reply(f"⚠️ Ошибка: '{chat_input}' — это ID/username пользователя. Требуется ID чата, ссылка на канал/группу.")
+                    await evt.reply(f"⚠️ Ошибка: '{chat_input}' — это ID/username пользователя. Требуется ID чата, ссылка на канал/группу.", parse_mode='md')
                     return
                 
                 # 3. Извлекаем числовой ID, используя peer_id для надежности
-                from telethon.utils import get_peer_id
-                chat_id = get_peer_id(entity, add_mark=True) # add_mark=True гарантирует отрицательный ID для чатов
+                # Мы используем get_peer_id, но без add_mark, так как entity.id уже должен быть правильным, 
+                # а проверка на тип Entity надежнее.
+                chat_id = entity.id 
+                
+                # Проверка: ID должен быть отрицательным (для каналов/групп)
+                if chat_id > 0:
+                    chat_id = get_peer_id(entity, add_mark=True)
                 
                 # 4. Получаем название
                 title = get_display_name(entity)
@@ -500,10 +525,36 @@ async def on_command(evt: events.NewMessage.Event):
                 # Telethon может выдать ошибку, если не может найти чат или бот не в нем
                 await evt.reply(f"⚠️ Ошибка: Не удалось найти чат по ссылке или ID. Возможно, бот не состоит в этом чате. Ошибка: {e}")
         
+        elif subcmd == "del" and len(parts) == 3: # <-- НОВАЯ КОМАНДА
+            chat_input = parts[2].strip()
+            try:
+                # Попытка получить ID из ссылки/ID
+                entity = await client.get_entity(chat_input)
+                chat_id = entity.id 
+                if chat_id > 0: # Если это не канал/группа, пытаемся получить ID
+                    chat_id = get_peer_id(entity, add_mark=True)
+                    
+                if delete_source(chat_id):
+                    await evt.reply(f"✓ Источник `{chat_id}` (**{get_display_name(entity)}**) удален.", parse_mode='md')
+                else:
+                    await evt.reply(f"⚠️ Источник `{chat_id}` не найден в списке.", parse_mode='md')
+            except ValueError:
+                await evt.reply("⚠️ Неверный формат ID/ссылки.")
+            except Exception:
+                # Если не удалось получить сущность, ищем по введенному ID, если это число
+                try:
+                    chat_id = int(chat_input)
+                    if delete_source(chat_id):
+                        await evt.reply(f"✓ Источник `{chat_id}` удален.", parse_mode='md')
+                    else:
+                        await evt.reply(f"⚠️ Источник `{chat_id}` не найден в списке.", parse_mode='md')
+                except ValueError:
+                    await evt.reply("⚠️ Не удалось определить ID источника. Используйте ID, @username или ссылку.")
+
         elif subcmd == "list":
             sources = list_sources()
             await evt.reply(f"📢 Источники ({len(sources)}):\n" + 
-                          "\n".join(f"• {title} (ID: {cid})" for cid, title in sources) if sources else "Список пуст")
+                          "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
     
     # /ai - управление AI правилами (без изменений)
     elif cmd == "/ai":
@@ -541,18 +592,9 @@ async def on_command(evt: events.NewMessage.Event):
                 await evt.reply(f"✓ AI правило удалено для чата {chat_id}")
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
-
-    # НОВАЯ КОМАНДА: /why - причина пересылки
-    elif cmd == "/why":
-        if evt.reply_to_msg_id:
-            target_msg_id = evt.reply_to_msg_id
-            reason = get_forward_reason(target_msg_id)
-            if reason:
-                await evt.reply(f"🔍 **Причина пересылки**:\n{reason}", parse_mode='md')
-            else:
-                await evt.reply("⚠️ Не удалось найти причину пересылки для этого сообщения. Возможно, оно было переслано без использования этой функции.")
-        else:
-            await evt.reply("Используйте /why, ответив на пересланное сообщение в этом чате.")
+                
+    # /why команда была перенесена в отдельный обработчик on_command_why
+    # ...
 
     # НОВАЯ КОМАНДА: /ban - блокировка пользователя
     elif cmd == "/ban":
@@ -689,7 +731,8 @@ async def on_command(evt: events.NewMessage.Event):
 /neg list          - показать все негативные слова
 
 --- Управление источниками и AI ---
-/src add <chat_id> - добавить источник для мониторинга
+/src add <id|@user|t.me/link> - добавить источник для мониторинга
+/src del <id|@user|t.me/link> - удалить источник
 /src list          - показать все источники
 
 /ai set <chat_id> <правило> - установить AI фильтр (сейчас заглушен)
@@ -709,7 +752,7 @@ async def on_command(evt: events.NewMessage.Event):
 
 /help              - эта справка
         """
-        await evt.reply(help_text)
+        await evt.reply(help_text, parse_mode='md')
 
 # ====== Запуск ======
 async def main():
