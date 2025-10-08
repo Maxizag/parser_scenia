@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 import openai
 from telethon.utils import get_peer_id
-from telethon.tl.types import User, Channel, Chat # Добавил Channel, Chat для проверки Entity
+from telethon.tl.types import User, Channel, Chat 
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
@@ -157,7 +157,7 @@ def add_source(chat_id, chat_title):
         log.error(f"Error adding source: {e}")
         return False
 
-def delete_source(chat_id): # <-- НОВАЯ ФУНКЦИЯ
+def delete_source(chat_id):
     cursor.execute("DELETE FROM sources WHERE chat_id = ?", (chat_id,))
     conn.commit()
     return cursor.rowcount > 0
@@ -282,8 +282,6 @@ async def get_sender_info(sender_id):
 # ====== AI фильтр (ЗАГЛУШКА) ======
 async def ai_filter(text, chat_id):
     # Эта функция теперь всегда возвращает True, пропуская сообщение
-    # и сообщая в лог, что AI-проверка заглушена.
-    # Чтобы включить AI, верните оригинальный код ai_filter
     return True, "SKIPPED (AI check is intentionally disabled)"
 
 
@@ -299,7 +297,7 @@ async def on_message(evt: events.NewMessage.Event):
     if evt.chat_id == CONTROL_CHAT_ID:
         return
 
-    # НОВАЯ ПРОВЕРКА: Блокировка пользователя
+    # ПРОВЕРКА: Блокировка пользователя
     if evt.sender_id and is_banned(evt.sender_id):
         log.info(f"✗ Skipped message from banned user: {evt.sender_id}")
         return
@@ -397,9 +395,15 @@ async def on_message(evt: events.NewMessage.Event):
 
     await asyncio.sleep(0.6)
 
+# ---
+
 # ====== БЫСТРАЯ КОМАНДА 'BAN' В ЦЕЛЕВОМ ЧАТЕ (TARGET_CHAT_ID) ======
-@client.on(events.NewMessage(chats=TARGET_CHAT_ID, pattern=r'^(?i)ban$'))
+@client.on(events.NewMessage(chats=TARGET_CHAT_ID)) 
 async def on_quick_ban(evt: events.NewMessage.Event):
+    # Проверка: сообщение должно быть ровно 'ban' (независимо от регистра)
+    if (evt.message.message or "").strip().lower() != 'ban':
+        return
+        
     # 1. Проверка прав (только администратор)
     if not is_admin(evt.sender_id):
         return
@@ -417,7 +421,7 @@ async def on_quick_ban(evt: events.NewMessage.Event):
         match = re.search(r'UID: `(\d+)`', text_to_search)
         
         if not match:
-            await evt.reply("⚠️ Не удалось найти ID пользователя (UID: `...`) в тексте этого сообщения.", parse_mode='md')
+            await evt.reply("⚠️ Не удалось найти ID пользователя (`UID: ...`) в тексте этого сообщения.", parse_mode='md')
             return
 
         user_id_to_ban = int(match.group(1))
@@ -437,6 +441,7 @@ async def on_quick_ban(evt: events.NewMessage.Event):
         log.error(f"Error during quick ban: {e}")
         await evt.reply("❌ Произошла ошибка при попытке бана.", parse_mode='md')
 
+# ---
 
 # ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ /WHY (РАБОТАЕТ В ОБОИХ ЧАТАХ) ======
 @client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/why'))
@@ -455,6 +460,8 @@ async def on_command_why(evt: events.NewMessage.Event):
             await evt.reply("⚠️ Не удалось найти причину пересылки для этого сообщения. Убедитесь, что вы отвечаете на сообщение, которое **только что** переслал бот.", parse_mode='md')
     else:
         await evt.reply("Используйте /why, ответив на пересланное сообщение в этом чате.", parse_mode='md')
+
+# ---
 
 # ====== ОСНОВНОЙ ОБРАБОТЧИК КОМАНД ======
 @client.on(events.NewMessage(chats=CONTROL_CHAT_ID, pattern=r'^/'))
@@ -562,7 +569,7 @@ async def on_command(evt: events.NewMessage.Event):
                 # Telethon может выдать ошибку, если не может найти чат или бот не в нем
                 await evt.reply(f"⚠️ Ошибка: Не удалось найти чат по ссылке или ID. Возможно, бот не состоит в этом чате. Ошибка: {e}")
         
-        elif subcmd == "del" and len(parts) == 3: # <-- НОВАЯ КОМАНДА
+        elif subcmd == "del" and len(parts) == 3: 
             chat_input = parts[2].strip()
             try:
                 # Попытка получить ID из ссылки/ID
