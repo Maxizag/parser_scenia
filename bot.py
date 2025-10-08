@@ -397,6 +397,47 @@ async def on_message(evt: events.NewMessage.Event):
 
     await asyncio.sleep(0.6)
 
+# ====== БЫСТРАЯ КОМАНДА 'BAN' В ЦЕЛЕВОМ ЧАТЕ (TARGET_CHAT_ID) ======
+@client.on(events.NewMessage(chats=TARGET_CHAT_ID, pattern=r'^(?i)ban$'))
+async def on_quick_ban(evt: events.NewMessage.Event):
+    # 1. Проверка прав (только администратор)
+    if not is_admin(evt.sender_id):
+        return
+    
+    # 2. Проверка, что это ответ на сообщение
+    if not evt.reply_to_msg_id:
+        return
+
+    # 3. Находим сообщение, на которое ответили
+    try:
+        replied_msg = await client.get_messages(evt.chat_id, ids=evt.reply_to_msg_id)
+        
+        # 4. Ищем UID: `12345` в тексте пересланного сообщения
+        text_to_search = replied_msg.message or ""
+        match = re.search(r'UID: `(\d+)`', text_to_search)
+        
+        if not match:
+            await evt.reply("⚠️ Не удалось найти ID пользователя (UID: `...`) в тексте этого сообщения.", parse_mode='md')
+            return
+
+        user_id_to_ban = int(match.group(1))
+
+        # 5. Выполняем бан
+        if ban_user(user_id_to_ban):
+            try:
+                entity = await client.get_entity(user_id_to_ban)
+                ban_name = get_display_name(entity)
+                await evt.reply(f"✅ **Быстрый БАН!** Сообщения от **{ban_name}** (ID: `{user_id_to_ban}`) будут игнорироваться.", parse_mode='md')
+            except Exception:
+                await evt.reply(f"✅ **Быстрый БАН!** Сообщения от ID `{user_id_to_ban}` будут игнорироваться.", parse_mode='md')
+        else:
+            await evt.reply(f"⚠️ Пользователь ID `{user_id_to_ban}` уже был заблокирован.", parse_mode='md')
+
+    except Exception as e:
+        log.error(f"Error during quick ban: {e}")
+        await evt.reply("❌ Произошла ошибка при попытке бана.", parse_mode='md')
+
+
 # ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ /WHY (РАБОТАЕТ В ОБОИХ ЧАТАХ) ======
 @client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/why'))
 async def on_command_why(evt: events.NewMessage.Event):
@@ -503,12 +544,8 @@ async def on_command(evt: events.NewMessage.Event):
                     return
                 
                 # 3. Извлекаем числовой ID, используя peer_id для надежности
-                # Мы используем get_peer_id, но без add_mark, так как entity.id уже должен быть правильным, 
-                # а проверка на тип Entity надежнее.
                 chat_id = entity.id 
-                
-                # Проверка: ID должен быть отрицательным (для каналов/групп)
-                if chat_id > 0:
+                if chat_id > 0: 
                     chat_id = get_peer_id(entity, add_mark=True)
                 
                 # 4. Получаем название
@@ -531,7 +568,7 @@ async def on_command(evt: events.NewMessage.Event):
                 # Попытка получить ID из ссылки/ID
                 entity = await client.get_entity(chat_input)
                 chat_id = entity.id 
-                if chat_id > 0: # Если это не канал/группа, пытаемся получить ID
+                if chat_id > 0: 
                     chat_id = get_peer_id(entity, add_mark=True)
                     
                 if delete_source(chat_id):
@@ -745,6 +782,9 @@ async def on_command(evt: events.NewMessage.Event):
 /ban add <id>      - заблокировать пользователя по ID (или ответьте на пересланное сообщение)
 /ban remove <id>   - разблокировать пользователя
 /ban list          - показать список заблокированных
+
+**Команда быстрого бана:**
+Просто ответьте **ban** на сообщение в целевом чате.
 
 /owner add <id>    - добавить нового администратора
 /owner remove <id> - удалить администратора
