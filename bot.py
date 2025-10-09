@@ -528,28 +528,45 @@ async def on_command(evt: events.NewMessage.Event):
         
         elif subcmd in ["add", "del"]:
             
-            # /kw add/del <слово> (глобально)
-            if len(parts) == 3:
-                keyword = parts[2].strip()
-                target_id = 0
-            
-            # /kw add/del <ID> <слово> (корректный парсинг для 4 аргументов)
-            elif len(parts) == 4: 
-                # parts[2] = ID
-                # parts[3] = Слово
-                
-                try:
-                    target_id = int(parts[2])
-                    keyword = parts[3].strip()
-                except ValueError:
-                    # Если parts[2] не число
-                    await evt.reply("⚠️ Ошибка: ID чата должен быть числом.", parse_mode='md')
+            # Текст, который идет после /kw add/del
+            # Используем text.replace, чтобы получить всю оставшуюся часть сообщения, независимо от того, как его разбил Telethon
+            try:
+                # Находим команду и подкоманду, чтобы убрать их из текста
+                command_prefix = f"{cmd} {subcmd}"
+                remaining_text = text[len(command_prefix):].strip()
+
+                if not remaining_text:
+                    await evt.reply("⚠️ Неверный формат команды. Используйте: `/kw add [ID] <слово>`", parse_mode='md')
                     return
-            
-            else: # Неверное количество аргументов
-                await evt.reply("⚠️ Неверный формат команды. Используйте: `/kw add [ID] <слово>`", parse_mode='md')
+                
+                # 1. Сначала пытаемся разобрать как <ID> <слово>
+                id_part, keyword_part = remaining_text.split(maxsplit=1)
+                
+                # Проверяем, является ли первая часть числом (ID чата)
+                target_id = int(id_part)
+                keyword = keyword_part.strip()
+                
+            except ValueError:
+                # Если не получилось (нет пробела или не число), считаем, что это <слово> глобально
+                target_id = 0
+                keyword = remaining_text.strip()
+                
+                # Дополнительная проверка, чтобы избежать /kw add -1001810451666 (без слова)
+                try:
+                    _ = int(keyword)
+                    # Если это число, и мы не смогли его разобрать как <ID> <слово>, это ошибка.
+                    await evt.reply("⚠️ Неверный формат. Если вы указываете только число, оно должно быть ID, за которым следует ключевое слово.", parse_mode='md')
+                    return
+                except ValueError:
+                    # Это просто ключевое слово (например, /kw add соседи)
+                    pass
+
+
+            # Финальная проверка ключевого слова
+            if not keyword:
+                await evt.reply("⚠️ Ключевое слово не может быть пустым.", parse_mode='md')
                 return
-        
+
         else:
              await evt.reply("⚠️ Неизвестная подкоманда. Используйте: `add`, `del`, `list`.", parse_mode='md')
              return
@@ -557,6 +574,10 @@ async def on_command(evt: events.NewMessage.Event):
         # ----------------- ЛОГИКА ДЕЙСТВИЯ -----------------
 
         if subcmd == "add" and keyword:
+            
+            # !!! Важно: удаляем старое некорректно добавленное слово, если оно содержало ID и слово в одной строке
+            # Это удалит записи типа '-1001810451666 соседи' из глобальных.
+            delete_keyword(f"{target_id} {keyword}", 0) 
             
             if add_keyword(keyword, target_id):
                 chat_name = await get_chat_title(target_id)
