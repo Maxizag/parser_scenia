@@ -39,7 +39,6 @@ cursor = conn.cursor()
 
 
 # Создание таблиц (ВНИМАНИЕ: Таблица keywords изменена для chat_id!)
-# ПРЕДУПРЕЖДЕНИЕ: Если ты не выполнил ALTER TABLE, тебе нужно сделать это вручную.
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS keywords (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,7 +273,7 @@ async def get_chat_title(chat_id):
     try:
         # Убедимся, что ID чата для entity корректен (например, не 0)
         if chat_id == 0:
-            return "Глобальные Ключевые Слова"
+            return "Глобально"
             
         entity = await client.get_entity(chat_id)
         return get_display_name(entity)
@@ -376,7 +375,7 @@ async def on_message(evt: events.NewMessage.Event):
             header = f"**Монитор чатов**"
             chat_line = f"Чат: [{chat_title}]({original_link})"
             
-            # Форматирование отправителя: теперь без обратных кавычек вокруг ID (ИСПРАВЛЕНО)
+            # Форматирование отправителя
             sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
             sender_line = f"Отправитель: {sender_display}\nUID: {sender_info['id']}" 
             
@@ -434,7 +433,7 @@ async def on_quick_ban(evt: events.NewMessage.Event):
     try:
         replied_msg = await client.get_messages(evt.chat_id, ids=evt.reply_to_msg_id)
         
-        # 4. Ищем UID: 12345 в тексте пересланного сообщения (ИСПРАВЛЕНО)
+        # 4. Ищем UID: 12345 в тексте пересланного сообщения
         text_to_search = replied_msg.message or ""
         match = re.search(r'UID: (\d+)', text_to_search) 
         
@@ -491,16 +490,20 @@ async def on_command(evt: events.NewMessage.Event):
         return
     
     text = evt.message.message.strip()
-    parts = text.split(maxsplit=2)
+    # parts: [0]=/cmd, [1]=subcmd, [2]=остаток текста
+    parts = text.split(maxsplit=2) 
     
     if len(parts) < 1:
         return
     
     cmd = parts[0].lower()
     
-    # /kw - управление ключевыми словами (ИСПРАВЛЕНО)
+    # /kw - управление ключевыми словами (ФИНАЛЬНО ИСПРАВЛЕНО)
     if cmd == "/kw":
         
+        # Общий синтаксис: /kw <cmd> [chat_id] <keyword>
+        
+        # Если нет аргументов, выводим глобальные
         if len(parts) < 2:
             kws = get_keywords(0) # Получаем только глобальные (chat_id=0)
             await evt.reply(f"📝 Глобальные ключевые слова ({len(kws)}):\n" + "\n".join(f"• {kw}" for kw in kws) if kws else "Список пуст")
@@ -525,25 +528,25 @@ async def on_command(evt: events.NewMessage.Event):
         
         elif subcmd in ["add", "del"]:
             
-            # /kw add <слово> (глобально)
+            # /kw add/del <слово> (глобально)
             if len(parts) == 3:
                 keyword = parts[2].strip()
                 target_id = 0
             
-            # /kw add <ID> <слово>
-            elif len(parts) == 4: # Если команда была split(maxsplit=2), то parts[2] содержит ID и слово
+            # /kw add/del <ID> <слово> (корректный парсинг для 4 аргументов)
+            elif len(parts) == 4: 
+                # parts[2] = ID
+                # parts[3] = Слово
                 
                 try:
-                    # Разбиваем parts[2] на ID и слово, используя maxsplit=1 для корректного парсинга
-                    id_part, keyword_part = parts[2].split(maxsplit=1)
-                    target_id = int(id_part)
-                    keyword = keyword_part.strip()
+                    target_id = int(parts[2])
+                    keyword = parts[3].strip()
                 except ValueError:
-                    # Если parts[2] не разбилось на ID и слово
-                    await evt.reply("⚠️ Ошибка: Неверный формат. Используйте `/kw add <ID> <слово>`.", parse_mode='md')
+                    # Если parts[2] не число
+                    await evt.reply("⚠️ Ошибка: ID чата должен быть числом.", parse_mode='md')
                     return
             
-            else: # len(parts) < 3 для add/del
+            else: # Неверное количество аргументов
                 await evt.reply("⚠️ Неверный формат команды. Используйте: `/kw add [ID] <слово>`", parse_mode='md')
                 return
         
@@ -554,19 +557,20 @@ async def on_command(evt: events.NewMessage.Event):
         # ----------------- ЛОГИКА ДЕЙСТВИЯ -----------------
 
         if subcmd == "add" and keyword:
+            
             if add_keyword(keyword, target_id):
-                chat_name = await get_chat_title(target_id) if target_id else "Глобально"
+                chat_name = await get_chat_title(target_id)
                 await evt.reply(f"✓ Добавлено слово **'{keyword}'** для: **{chat_name}** (ID: `{target_id}`)", parse_mode='md')
             else:
-                chat_name = await get_chat_title(target_id) if target_id else "Глобально"
+                chat_name = await get_chat_title(target_id)
                 await evt.reply(f"⚠️ Уже существует: **{keyword}** для {chat_name}", parse_mode='md')
 
         elif subcmd == "del" and keyword:
             if delete_keyword(keyword, target_id): 
-                chat_name = await get_chat_title(target_id) if target_id else "Глобально"
+                chat_name = await get_chat_title(target_id)
                 await evt.reply(f"✓ Удалено слово **'{keyword}'** для: **{chat_name}** (ID: `{target_id}`)", parse_mode='md')
             else:
-                chat_name = await get_chat_title(target_id) if target_id else "Глобально"
+                chat_name = await get_chat_title(target_id)
                 await evt.reply(f"⚠️ Слово **'{keyword}'** не найдено для: {chat_name}", parse_mode='md')
 
         elif subcmd == "list":
@@ -867,7 +871,7 @@ async def on_command(evt: events.NewMessage.Event):
 📚 Доступные команды:
 
 --- Управление фильтрами ---
-**/kw add [ID] <слово> - добавить ключевое слово (ID опционален, по умолчанию - глобально)**
+** /kw add [ID] <слово> - добавить ключевое слово (ID опционален, по умолчанию - глобально)**
 /kw del [ID] <слово> - удалить ключевое слово
 /kw list [ID]        - показать ключевые слова (ID опционален, по умолчанию - глобально)
 
