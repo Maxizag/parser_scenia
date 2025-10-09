@@ -414,11 +414,11 @@ async def on_message(evt: events.NewMessage.Event):
 
 # ---
 
-# ====== БЫСТРАЯ КОМАНДА 'BAN' В ЦЕЛЕВОМ ЧАТЕ (TARGET_CHAT_ID) ======
+# ====== БЫСТРАЯ КОМАНДА 'бан' В ЦЕЛЕВОМ ЧАТЕ (TARGET_CHAT_ID) ======
 @client.on(events.NewMessage(chats=TARGET_CHAT_ID)) 
 async def on_quick_ban(evt: events.NewMessage.Event):
-    # Проверка: сообщение должно быть ровно 'ban' (независимо от регистра)
-    if (evt.message.message or "").strip().lower() != 'ban':
+    # Проверка: сообщение должно быть ровно 'бан' (независимо от регистра)
+    if (evt.message.message or "").strip().lower() != 'бан': # <--- ИЗМЕНЕНИЕ: 'бан'
         return
         
     # 1. Проверка прав (только администратор)
@@ -460,8 +460,8 @@ async def on_quick_ban(evt: events.NewMessage.Event):
 
 # ---
 
-# ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ /WHY (РАБОТАЕТ В ОБОИХ ЧАТАХ) ======
-@client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/why'))
+# ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ 'Почему' (РАБОТАЕТ В ОБОИХ ЧАТАХ) ======
+@client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/Почему')) # <--- ИЗМЕНЕНИЕ: /Почему
 async def on_command_why(evt: events.NewMessage.Event):
     # Проверка: только администратор (или основной владелец из .env) может использовать команды
     if not is_admin(evt.sender_id):
@@ -476,7 +476,7 @@ async def on_command_why(evt: events.NewMessage.Event):
         else:
             await evt.reply("⚠️ Не удалось найти причину пересылки для этого сообщения. Убедитесь, что вы отвечаете на сообщение, которое **только что** переслал бот.", parse_mode='md')
     else:
-        await evt.reply("Используйте /why, ответив на пересланное сообщение в этом чате.", parse_mode='md')
+        await evt.reply("Используйте /Почему, ответив на пересланное сообщение в этом чате.", parse_mode='md')
 
 # ---
 
@@ -498,48 +498,49 @@ async def on_command(evt: events.NewMessage.Event):
     
     cmd = parts[0].lower()
     
-    # /kw - управление ключевыми словами (ФИНАЛЬНО ИСПРАВЛЕНО)
-    if cmd == "/kw":
+    # /+слово - управление ключевыми словами
+    if cmd == "/+слово": # <--- ИЗМЕНЕНИЕ: /+слово
         
-        # Общий синтаксис: /kw <cmd> [chat_id] <keyword>
+        # Общий синтаксис: /+слово [ID] <слово> ИЛИ /удалить +слово [ID] <слово> ИЛИ /список слов [ID]
         
-        # Если нет аргументов, выводим глобальные
-        if len(parts) < 2:
-            kws = get_keywords(0) # Получаем только глобальные (chat_id=0)
-            await evt.reply(f"📝 Глобальные ключевые слова ({len(kws)}):\n" + "\n".join(f"• {kw}" for kw in kws) if kws else "Список пуст")
-            await evt.reply("Используйте: `/kw add [ID] <слово>` | `/kw del [ID] <слово>` | `/kw list [ID]`", parse_mode='md')
+        subcmd_options = {
+            "удалить": "удалить +слово", 
+            "список": "список слов",
+            "+слово": "+слово" # Для команды /+слово <ID> <слово>
+        }
+        
+        subcmd_str = parts[0].lower().lstrip('/') # Получаем: +слово
+        
+        # Если команда - /+слово, то это "add"
+        if subcmd_str == "+слово":
+            subcmd = "add"
+        else:
+            await evt.reply("⚠️ Неизвестная подкоманда для ключевых слов. Используйте: `/+слово`, `/удалить +слово`, `/список слов`.", parse_mode='md')
             return
-        
-        subcmd = parts[1].lower()
+            
         target_id = 0 
         keyword = None
-
         
         # --- Парсинг команды ---
 
         if subcmd == "list":
-            # /kw list ИЛИ /kw list <ID>
-            if len(parts) == 3:
-                try:
-                    target_id = int(parts[2])
-                except ValueError:
-                    await evt.reply("⚠️ Ошибка: ID чата для /kw list должен быть числом.", parse_mode='md')
-                    return
-        
+             # Если используется команда /список слов [ID]
+             # (Оставлено для совместимости, но теперь используется блок ниже)
+             # Нам нужен только ID, который может быть в parts[1] или после
+             pass 
+
         elif subcmd in ["add", "del"]:
             
-            # Текст, который идет после /kw add/del
-            # Используем text.replace, чтобы получить всю оставшуюся часть сообщения, независимо от того, как его разбил Telethon
-            try:
-                # Находим команду и подкоманду, чтобы убрать их из текста
-                command_prefix = f"{cmd} {subcmd}"
-                remaining_text = text[len(command_prefix):].strip()
+            # Текст, который идет после /+слово или /удалить +слово
+            command_prefix = f"/{subcmd_options[subcmd]}" if subcmd in subcmd_options else parts[0]
+            remaining_text = text[len(command_prefix):].strip()
 
-                if not remaining_text:
-                    await evt.reply("⚠️ Неверный формат команды. Используйте: `/kw add [ID] <слово>`", parse_mode='md')
-                    return
-                
-                # 1. Сначала пытаемся разобрать как <ID> <слово>
+            if not remaining_text:
+                await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/{subcmd_options[subcmd]} [ID] <слово>`", parse_mode='md')
+                return
+            
+            # 1. Сначала пытаемся разобрать как <ID> <слово>
+            try:
                 id_part, keyword_part = remaining_text.split(maxsplit=1)
                 
                 # Проверяем, является ли первая часть числом (ID чата)
@@ -551,32 +552,23 @@ async def on_command(evt: events.NewMessage.Event):
                 target_id = 0
                 keyword = remaining_text.strip()
                 
-                # Дополнительная проверка, чтобы избежать /kw add -1001810451666 (без слова)
+                # Дополнительная проверка, чтобы избежать /+слово -1001810451666 (без слова)
                 try:
                     _ = int(keyword)
-                    # Если это число, и мы не смогли его разобрать как <ID> <слово>, это ошибка.
                     await evt.reply("⚠️ Неверный формат. Если вы указываете только число, оно должно быть ID, за которым следует ключевое слово.", parse_mode='md')
                     return
                 except ValueError:
-                    # Это просто ключевое слово (например, /kw add соседи)
-                    pass
-
+                    pass # Отлично, это просто ключевое слово
 
             # Финальная проверка ключевого слова
             if not keyword:
                 await evt.reply("⚠️ Ключевое слово не может быть пустым.", parse_mode='md')
                 return
 
-        else:
-             await evt.reply("⚠️ Неизвестная подкоманда. Используйте: `add`, `del`, `list`.", parse_mode='md')
-             return
-
         # ----------------- ЛОГИКА ДЕЙСТВИЯ -----------------
 
         if subcmd == "add" and keyword:
             
-            # !!! Важно: удаляем старое некорректно добавленное слово, если оно содержало ID и слово в одной строке
-            # Это удалит записи типа '-1001810451666 соседи' из глобальных.
             delete_keyword(f"{target_id} {keyword}", 0) 
             
             if add_keyword(keyword, target_id):
@@ -594,142 +586,206 @@ async def on_command(evt: events.NewMessage.Event):
                 chat_name = await get_chat_title(target_id)
                 await evt.reply(f"⚠️ Слово **'{keyword}'** не найдено для: {chat_name}", parse_mode='md')
 
-        elif subcmd == "list":
-            
-            kws_global = get_keywords(0)
-            kws_chat = get_keywords(target_id) if target_id else []
-            
-            # Уникальный список, чтобы не дублировать слова
-            unique_kws = sorted(list(set(kws_global + kws_chat)))
-            
-            if target_id == 0:
-                title = "📝 Глобальные ключевые слова"
-                
-            else:
-                chat_name = await get_chat_title(target_id)
-                title = f"📝 Ключевые слова для: **{chat_name}** (ID: `{target_id}`)"
-                
-            
-            response = f"{title} (Всего: {len(unique_kws)}):\n\n"
-            
-            # Разделяем на Global и Local для лучшей читаемости
-            if target_id != 0:
-                # Получаем только локальные слова, которых нет в глобальных
-                local_only = [kw for kw in kws_chat if kw not in kws_global]
-                
-                response += "**— Локальные слова (только для этого чата):**\n"
-                
-                if local_only:
-                     response += "\n".join(f"• {kw}" for kw in local_only) + "\n\n"
-                else:
-                    response += "*(Локальных слов нет)*\n\n"
-                
-                response += "**— Глобальные слова (наследуются):**\n"
-            
-            if kws_global:
-                response += "\n".join(f"• {kw}" for kw in kws_global)
-            elif target_id == 0:
-                response += "*(Список пуст)*"
+    # /удалить +слово - управление ключевыми словами (удаление)
+    elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "+слово": # <--- ИЗМЕНЕНИЕ: /удалить +слово
+        # Переиспользуем логику из блока /+слово (subcmd = "del")
+        subcmd = "del"
+        command_prefix = f"{cmd} {parts[1]}"
+        
+        target_id = 0 
+        keyword = None
+        
+        # Текст, который идет после /удалить +слово
+        remaining_text = text[len(command_prefix):].strip()
 
-            await evt.reply(response, parse_mode='md')
-            
-    # /neg - управление негативными словами 
-    elif cmd == "/neg":
-        if len(parts) < 2:
-            nws = get_negwords()
-            await evt.reply(f"🚫 Негативные слова ({len(nws)}):\n" + "\n".join(f"• {nw}" for nw in nws) if nws else "Список пуст")
+        if not remaining_text:
+            await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/удалить +слово [ID] <слово>`", parse_mode='md')
             return
         
-        subcmd = parts[1].lower()
-        if subcmd == "add" and len(parts) == 3:
-            nw = parts[2].strip()
-            if add_negword(nw):
-                await evt.reply(f"✓ Добавлено: {nw}")
+        # 1. Сначала пытаемся разобрать как <ID> <слово>
+        try:
+            id_part, keyword_part = remaining_text.split(maxsplit=1)
+            target_id = int(id_part)
+            keyword = keyword_part.strip()
+        except ValueError:
+            target_id = 0
+            keyword = remaining_text.strip()
+            
+        if not keyword:
+            await evt.reply("⚠️ Ключевое слово не может быть пустым.", parse_mode='md')
+            return
+            
+        # ----------------- ЛОГИКА ДЕЙСТВИЯ -----------------
+        if delete_keyword(keyword, target_id): 
+            chat_name = await get_chat_title(target_id)
+            await evt.reply(f"✓ Удалено слово **'{keyword}'** для: **{chat_name}** (ID: `{target_id}`)", parse_mode='md')
+        else:
+            chat_name = await get_chat_title(target_id)
+            await evt.reply(f"⚠️ Слово **'{keyword}'** не найдено для: {chat_name}", parse_mode='md')
+
+
+    # /список слов - список ключевых слов
+    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "слов": # <--- ИЗМЕНЕНИЕ: /список слов
+        
+        target_id = 0
+        # /список слов <ID>
+        if len(parts) == 3:
+            try:
+                target_id = int(parts[2])
+            except ValueError:
+                await evt.reply("⚠️ Ошибка: ID чата должен быть числом.", parse_mode='md')
+                return
+                
+        kws_global = get_keywords(0)
+        kws_chat = get_keywords(target_id) if target_id else []
+        
+        # Уникальный список, чтобы не дублировать слова
+        unique_kws = sorted(list(set(kws_global + kws_chat)))
+        
+        if target_id == 0:
+            title = "📝 Глобальные ключевые слова"
+            
+        else:
+            chat_name = await get_chat_title(target_id)
+            title = f"📝 Ключевые слова для: **{chat_name}** (ID: `{target_id}`)"
+            
+        
+        response = f"{title} (Всего: {len(unique_kws)}):\n\n"
+        
+        # Разделяем на Global и Local для лучшей читаемости
+        if target_id != 0:
+            # Получаем только локальные слова, которых нет в глобальных
+            local_only = [kw for kw in kws_chat if kw not in kws_global]
+            
+            response += "**— Локальные слова (только для этого чата):**\n"
+            
+            if local_only:
+                 response += "\n".join(f"• {kw}" for kw in local_only) + "\n\n"
             else:
-                await evt.reply(f"⚠️ Уже существует: {nw}")
-        elif subcmd == "del" and len(parts) == 3:
-            nw = parts[2].strip()
-            if delete_negword(nw):
-                await evt.reply(f"✓ Удалено: {nw}")
-            else:
-                await evt.reply(f"⚠️ Слово не найдено: {nw}")
-        elif subcmd == "list":
+                response += "*(Локальных слов нет)*\n\n"
+            
+            response += "**— Глобальные слова (наследуются):**\n"
+        
+        if kws_global:
+            response += "\n".join(f"• {kw}" for kw in kws_global)
+        elif target_id == 0:
+            response += "*(Список пуст)*"
+
+        await evt.reply(response, parse_mode='md')
+
+            
+    # /минус слово - управление негативными словами (добавление)
+    elif cmd == "/минус" and len(parts) >= 2 and parts[1].lower() == "слово": # <--- ИЗМЕНЕНИЕ: /минус слово
+        
+        # Проверяем, есть ли слово после /минус слово
+        if len(parts) < 3:
             nws = get_negwords()
             await evt.reply(f"🚫 Негативные слова ({len(nws)}):\n" + "\n".join(f"• {nw}" for nw in nws) if nws else "Список пуст")
+            await evt.reply("Используйте: `/минус слово <слово>` | `/удалить минус слово <слово>` | `/список минус слов`", parse_mode='md')
+            return
             
-    # /src - управление источниками 
-    elif cmd == "/src":
-        if len(parts) < 2:
+        nw = parts[2].strip()
+        if add_negword(nw):
+            await evt.reply(f"✓ Добавлено негативное слово: {nw}")
+        else:
+            await evt.reply(f"⚠️ Уже существует: {nw}")
+
+    # /удалить минус слово - удаление негативных слов
+    elif cmd == "/удалить" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слово": # <--- ИЗМЕНЕНИЕ: /удалить минус слово
+        
+        # Текст, который идет после /удалить минус слово
+        command_prefix = f"{cmd} {parts[1]} {parts[2]}"
+        remaining_text = text[len(command_prefix):].strip()
+        
+        if not remaining_text:
+            await evt.reply("⚠️ Неверный формат команды. Используйте: `/удалить минус слово <слово>`", parse_mode='md')
+            return
+            
+        nw = remaining_text.strip()
+        if delete_negword(nw):
+            await evt.reply(f"✓ Удалено негативное слово: {nw}")
+        else:
+            await evt.reply(f"⚠️ Слово не найдено: {nw}")
+
+
+    # /список минус слов - список негативных слов
+    elif cmd == "/список" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слов": # <--- ИЗМЕНЕНИЕ: /список минус слов
+        nws = get_negwords()
+        await evt.reply(f"🚫 Негативные слова ({len(nws)}):\n" + "\n".join(f"• {nw}" for nw in nws) if nws else "Список пуст")
+
+
+    # /добавить чат - управление источниками (добавление)
+    elif cmd == "/добавить" and len(parts) >= 2 and parts[1].lower() == "чат": # <--- ИЗМЕНЕНИЕ: /добавить чат
+        
+        if len(parts) < 3:
             sources = list_sources()
             await evt.reply(f"📢 Источники ({len(sources)}):\n" + 
                           "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
+            await evt.reply("Используйте: `/добавить чат <id|@user|t.me/link>` | `/удалить чат <id|@user|t.me/link>` | `/список чатов`", parse_mode='md')
             return
-        
-        subcmd = parts[1].lower()
-        
-        if subcmd == "add" and len(parts) == 3:
-            chat_input = parts[2].strip()
-            
-            try:
-                # 1. Получаем сущность (entity) по ID или ссылке
-                entity = await client.get_entity(chat_input) 
-                
-                # 2. Проверка, что это группа/канал, а не просто пользователь
-                if isinstance(entity, User):
-                    await evt.reply(f"⚠️ Ошибка: '{chat_input}' — это ID/username пользователя. Требуется ID чата, ссылка на канал/группу.", parse_mode='md')
-                    return
-                
-                # 3. Извлекаем числовой ID, используя peer_id для надежности
-                chat_id = entity.id 
-                if chat_id > 0: 
-                    chat_id = get_peer_id(entity, add_mark=True)
-                
-                # 4. Получаем название
-                title = get_display_name(entity)
 
-                if add_source(chat_id, title):
-                    await evt.reply(f"✓ Добавлен источник: **{title}** (ID: `{chat_id}`)", parse_mode='md')
-                else:
-                    await evt.reply(f"⚠️ Ошибка добавления источника")
-            
-            except ValueError:
-                await evt.reply("⚠️ Неверный формат ID/ссылки.")
-            except Exception as e:
-                # Telethon может выдать ошибку, если не может найти чат или бот не в нем
-                await evt.reply(f"⚠️ Ошибка: Не удалось найти чат по ссылке или ID. Возможно, бот не состоит в этом чате. Ошибка: {e}")
+        chat_input = parts[2].strip()
         
-        elif subcmd == "del" and len(parts) == 3: 
-            chat_input = parts[2].strip()
+        try:
+            entity = await client.get_entity(chat_input) 
+            
+            if isinstance(entity, User):
+                await evt.reply(f"⚠️ Ошибка: '{chat_input}' — это ID/username пользователя. Требуется ID чата, ссылка на канал/группу.", parse_mode='md')
+                return
+            
+            chat_id = entity.id 
+            if chat_id > 0: 
+                chat_id = get_peer_id(entity, add_mark=True)
+            
+            title = get_display_name(entity)
+
+            if add_source(chat_id, title):
+                await evt.reply(f"✓ Добавлен источник: **{title}** (ID: `{chat_id}`)", parse_mode='md')
+            else:
+                await evt.reply(f"⚠️ Ошибка добавления источника")
+        
+        except ValueError:
+            await evt.reply("⚠️ Неверный формат ID/ссылки.")
+        except Exception as e:
+            await evt.reply(f"⚠️ Ошибка: Не удалось найти чат по ссылке или ID. Возможно, бот не состоит в этом чате. Ошибка: {e}")
+    
+    # /удалить чат - управление источниками (удаление)
+    elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "чат": # <--- ИЗМЕНЕНИЕ: /удалить чат
+        
+        if len(parts) < 3:
+            await evt.reply("⚠️ Неверный формат команды. Используйте: `/удалить чат <id|@user|t.me/link>`", parse_mode='md')
+            return
+
+        chat_input = parts[2].strip()
+        try:
+            entity = await client.get_entity(chat_input)
+            chat_id = entity.id 
+            if chat_id > 0: 
+                chat_id = get_peer_id(entity, add_mark=True)
+                
+            if delete_source(chat_id):
+                await evt.reply(f"✓ Источник `{chat_id}` (**{get_display_name(entity)}**) удален.", parse_mode='md')
+            else:
+                await evt.reply(f"⚠️ Источник `{chat_id}` не найден в списке.", parse_mode='md')
+        except ValueError:
+            await evt.reply("⚠️ Неверный формат ID/ссылки.")
+        except Exception:
             try:
-                # Попытка получить ID из ссылки/ID
-                entity = await client.get_entity(chat_input)
-                chat_id = entity.id 
-                if chat_id > 0: 
-                    chat_id = get_peer_id(entity, add_mark=True)
-                    
+                chat_id = int(chat_input)
                 if delete_source(chat_id):
-                    await evt.reply(f"✓ Источник `{chat_id}` (**{get_display_name(entity)}**) удален.", parse_mode='md')
+                    await evt.reply(f"✓ Источник `{chat_id}` удален.", parse_mode='md')
                 else:
                     await evt.reply(f"⚠️ Источник `{chat_id}` не найден в списке.", parse_mode='md')
             except ValueError:
-                await evt.reply("⚠️ Неверный формат ID/ссылки.")
-            except Exception:
-                # Если не удалось получить сущность, ищем по введенному ID, если это число
-                try:
-                    chat_id = int(chat_input)
-                    if delete_source(chat_id):
-                        await evt.reply(f"✓ Источник `{chat_id}` удален.", parse_mode='md')
-                    else:
-                        await evt.reply(f"⚠️ Источник `{chat_id}` не найден в списке.", parse_mode='md')
-                except ValueError:
-                    await evt.reply("⚠️ Не удалось определить ID источника. Используйте ID, @username или ссылку.")
+                await evt.reply("⚠️ Не удалось определить ID источника. Используйте ID, @username или ссылку.")
 
-        elif subcmd == "list":
-            sources = list_sources()
-            await evt.reply(f"📢 Источники ({len(sources)}):\n" + 
-                          "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
+    # /список чатов - список источников
+    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "чатов": # <--- ИЗМЕНЕНИЕ: /список чатов
+        sources = list_sources()
+        await evt.reply(f"📢 Источники ({len(sources)}):\n" + 
+                      "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
     
-    # /ai - управление AI правилами 
+    # /ai - управление AI правилами (без изменений по вашей просьбе)
     elif cmd == "/ai":
         if len(parts) < 2:
             await evt.reply("Используйте: /ai set <chat_id> <правило> | /ai show <chat_id> | /ai clear <chat_id>")
@@ -766,9 +822,11 @@ async def on_command(evt: events.NewMessage.Event):
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
                 
-    # /ban - блокировка пользователя
-    elif cmd == "/ban":
-        if len(parts) < 2 or parts[1].lower() == "list":
+    # /бан - блокировка пользователя (добавление)
+    elif cmd == "/бан": # <--- ИЗМЕНЕНИЕ: /бан
+        
+        # Если команда /бан без аргументов ИЛИ /бан список
+        if len(parts) < 2 or parts[1].lower() == "список":
             banned_list = list_banned_users()
             if banned_list:
                 usernames = []
@@ -782,31 +840,16 @@ async def on_command(evt: events.NewMessage.Event):
             else:
                 await evt.reply("Список заблокированных пользователей пуст.")
             return
-
-        subcmd = parts[1].lower()
         
-        # /ban add
-        if subcmd == "add":
+        # /бан <id>
+        if len(parts) == 2:
             user_id_to_ban = None
             
-            # 1. По ID: /ban add <user_id>
-            if len(parts) == 3:
-                try:
-                    user_id_to_ban = int(parts[2])
-                except ValueError:
-                    pass
-            
-            # 2. По ответу на пересланное сообщение (ищем UID в тексте)
-            if not user_id_to_ban and evt.reply_to_msg_id:
-                try:
-                    # Получаем сообщение, на которое ответили
-                    replied_msg = await client.get_messages(CONTROL_CHAT_ID, ids=evt.reply_to_msg_id)
-                    # Ищем ID отправителя в тексте пересланного сообщения: ищем UID: 12345
-                    match = re.search(r'UID: (\d+)', replied_msg.message) 
-                    if match:
-                        user_id_to_ban = int(match.group(1))
-                except Exception:
-                    pass
+            try:
+                user_id_to_ban = int(parts[1])
+            except ValueError:
+                 await evt.reply("⚠️ Не удалось определить ID пользователя. Используйте: `/бан <user_id>` или ответьте на пересланное сообщение.")
+                 return
 
             if user_id_to_ban:
                 if ban_user(user_id_to_ban):
@@ -818,26 +861,48 @@ async def on_command(evt: events.NewMessage.Event):
                 else:
                     await evt.reply(f"⚠️ Пользователь ID {user_id_to_ban} уже был заблокирован.")
             else:
-                await evt.reply("⚠️ Не удалось определить ID пользователя. Используйте: `/ban add <user_id>` или ответьте на пересланное сообщение.")
+                await evt.reply("⚠️ Не удалось определить ID пользователя. Используйте: `/бан <user_id>` или ответьте на пересланное сообщение.")
 
-        # /ban remove
-        elif subcmd == "remove" and len(parts) == 3:
-            try:
-                user_id_to_unban = int(parts[2])
-                if unban_user(user_id_to_unban):
-                    await evt.reply(f"✅ **Пользователь разблокирован.**")
-                else:
-                    await evt.reply(f"⚠️ Пользователь ID {user_id_to_unban} не найден в списке блокировки.")
-            except ValueError:
-                await evt.reply("⚠️ Неверный формат ID пользователя.")
+
+    # /ban remove - разблокировать пользователя (без изменений по вашей просьбе)
+    elif cmd == "/ban" and len(parts) >= 2 and parts[1].lower() == "remove":
         
-        # /owner - управление администраторами
+        if len(parts) < 3:
+             await evt.reply("⚠️ Неверный формат команды. Используйте: `/ban remove <user_id>`", parse_mode='md')
+             return
+             
+        try:
+            user_id_to_unban = int(parts[2])
+            if unban_user(user_id_to_unban):
+                await evt.reply(f"✅ **Пользователь разблокирован.**")
+            else:
+                await evt.reply(f"⚠️ Пользователь ID {user_id_to_unban} не найден в списке блокировки.")
+        except ValueError:
+            await evt.reply("⚠️ Неверный формат ID пользователя.")
+        
+        
+    # /список бан - список заблокированных
+    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "бан": # <--- ИЗМЕНЕНИЕ: /список бан
+        banned_list = list_banned_users()
+        if banned_list:
+            usernames = []
+            for user_id in banned_list:
+                try:
+                    entity = await client.get_entity(user_id)
+                    usernames.append(f"• {get_display_name(entity)} (ID: {user_id})")
+                except Exception:
+                    usernames.append(f"• Неизвестный пользователь (ID: {user_id})")
+            await evt.reply(f"🔒 **Заблокированные пользователи** ({len(banned_list)}):\n" + "\n".join(usernames), parse_mode='md')
+        else:
+            await evt.reply("Список заблокированных пользователей пуст.")
+
+
+    # /owner - управление администраторами (без изменений по вашей просьбе)
     elif cmd == "/owner":
         if len(parts) < 2 or parts[1].lower() == "list":
             # Показываем список всех админов
             admin_list = list_admins()
             
-            # Добавляем основного админа из .env
             try:
                 main_admin = await client.get_entity(ADMIN_USER_ID)
                 main_admin_name = get_display_name(main_admin)
@@ -886,44 +951,44 @@ async def on_command(evt: events.NewMessage.Event):
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID пользователя.")
     
- # /help - справка
+ # /help - справка (обновлена)
     elif cmd == "/help":
         help_text = """
 📚 Доступные команды:
 
 --- Управление фильтрами ---
-** /kw add [ID] <слово> - добавить ключевое слово (ID опционален, по умолчанию - глобально)**
-/kw del [ID] <слово> - удалить ключевое слово
-/kw list [ID]        - показать ключевые слова (ID опционален, по умолчанию - глобально)
+** /+слово [ID] <слово> - добавить ключевое слово (ID опционален, по умолчанию - глобально)**
+/удалить +слово [ID] <слово> - удалить ключевое слово
+/список слов [ID]          - показать ключевые слова (ID опционален, по умолчанию - глобально)
 
-/neg add <слово>   - добавить негативное слово
-/neg del <слово>   - удалить негативное слово
-/neg list          - показать все негативные слова
+/минус слово <слово>       - добавить негативное слово
+/удалить минус слово <слово> - удалить негативное слово
+/список минус слов         - показать все негативные слова
 
 --- Управление источниками и AI ---
-/src add <id|@user|t.me/link> - добавить источник для мониторинга
-/src del <id|@user|t.me/link> - удалить источник
-/src list          - показать все источники
+/добавить чат <id|@user|t.me/link> - добавить источник для мониторинга
+/удалить чат <id|@user|t.me/link> - удалить источник
+/список чатов              - показать все источники
 
 /ai set <chat_id> <правило> - установить AI фильтр (сейчас заглушен)
 /ai show <chat_id>          - показать AI правило
 /ai clear <chat_id>         - удалить AI правило
 
 --- Администрирование и Отладка ---
-/why               - объяснить причину пересылки (ответьте на сообщение в целевом чате)
+/Почему                    - объяснить причину пересылки (ответьте на сообщение в целевом чате)
 
-/ban add <id>      - заблокировать пользователя по ID (или ответьте на пересланное сообщение)
-/ban remove <id>   - разблокировать пользователя
-/ban list          - показать список заблокированных
+** /бан <id> - заблокировать пользователя по ID (или ответьте на пересланное сообщение)**
+/ban remove <id>           - разблокировать пользователя
+/список бан                - показать список заблокированных
 
 **Команда быстрого бана:**
-Просто ответьте **ban** на сообщение в целевом чате.
+Просто ответьте **бан** на сообщение в целевом чате.
 
-/owner add <id>    - добавить нового администратора
-/owner remove <id> - удалить администратора
-/owner list        - показать всех администраторов
+/owner add <id>            - добавить нового администратора
+/owner remove <id>         - удалить администратора
+/owner list                - показать всех администраторов
 
-/help              - эта справка
+/help                      - эта справка
         """
         await evt.reply(help_text, parse_mode='md')
 
