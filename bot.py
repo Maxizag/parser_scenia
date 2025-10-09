@@ -358,9 +358,9 @@ async def on_message(evt: events.NewMessage.Event):
             header = f"**Монитор чатов**"
             chat_line = f"Чат: [{chat_title}]({original_link})"
             
-            # Форматирование отправителя: всегда включаем ID для команды /ban
+            # ИСПРАВЛЕНО: УБРАНЫ ОБРАТНЫЕ КАВЫЧКИ ВОКРУГ UID
             sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
-            sender_line = f"Отправитель: {sender_display}\nUID: `{sender_info['id']}`" 
+            sender_line = f"Отправитель: {sender_display}\nUID: {sender_info['id']}" # <-- ИСПРАВЛЕНО!
             
             separator = "—" * 20
             
@@ -416,12 +416,14 @@ async def on_quick_ban(evt: events.NewMessage.Event):
     try:
         replied_msg = await client.get_messages(evt.chat_id, ids=evt.reply_to_msg_id)
         
-        # 4. Ищем UID: `12345` в тексте пересланного сообщения
+        # 4. Ищем UID: 12345 в тексте пересланного сообщения
         text_to_search = replied_msg.message or ""
-        match = re.search(r'UID: `(\d+)`', text_to_search)
+        # ИСПРАВЛЕНО: УПРОЩЕНО РЕГУЛЯРНОЕ ВЫРАЖЕНИЕ
+        match = re.search(r'UID: (\d+)', text_to_search) 
         
         if not match:
-            await evt.reply("⚠️ Не удалось найти ID пользователя (`UID: ...`) в тексте этого сообщения.", parse_mode='md')
+            # Обновлено сообщение об ошибке для ясности
+            await evt.reply("⚠️ Не удалось найти ID пользователя (UID: <ID>) в тексте этого сообщения. Проверьте форматирование.", parse_mode='md')
             return
 
         user_id_to_ban = int(match.group(1))
@@ -675,8 +677,8 @@ async def on_command(evt: events.NewMessage.Event):
                 try:
                     # Получаем сообщение, на которое ответили
                     replied_msg = await client.get_messages(CONTROL_CHAT_ID, ids=evt.reply_to_msg_id)
-                    # Ищем ID отправителя в тексте пересланного сообщения: ищем UID: `12345`
-                    match = re.search(r'UID: `(\d+)`', replied_msg.message)
+                    # Ищем ID отправителя в тексте пересланного сообщения: ищем UID: 12345
+                    match = re.search(r'UID: (\d+)', replied_msg.message) # <-- ИСПРАВЛЕНО
                     if match:
                         user_id_to_ban = int(match.group(1))
                 except Exception:
