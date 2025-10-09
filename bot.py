@@ -25,10 +25,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
    openai.api_key = OPENAI_API_KEY
 
-# ОЧЕНЬ ВАЖНАЯ СТРОКА ДЛЯ ОТЛАДКИ:
-print(f"DEBUG: Key status: {bool(OPENAI_API_KEY)} | Prefix: {OPENAI_API_KEY[:7]}")
-
-
 # Логирование
 logging.basicConfig(
     level=logging.INFO,
@@ -42,11 +38,14 @@ conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cursor = conn.cursor()
 
 
-# Создание таблиц
+# Создание таблиц (ВНИМАНИЕ: Таблица keywords изменена для chat_id!)
+# ПРЕДУПРЕЖДЕНИЕ: Если ты не выполнил ALTER TABLE, тебе нужно сделать это вручную.
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS keywords (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        keyword TEXT UNIQUE NOT NULL
+        chat_id INTEGER NOT NULL DEFAULT 0,
+        keyword TEXT NOT NULL,
+        UNIQUE(chat_id, keyword) 
     )
 """)
 
@@ -78,7 +77,6 @@ cursor.execute("""
     )
 """)
 
-# НОВАЯ ТАБЛИЦА: Заблокированные пользователи
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS banned_users (
         user_id INTEGER PRIMARY KEY
@@ -91,9 +89,7 @@ cursor.execute("""
         username TEXT
     )
 """)
-conn.commit()
 
-# НОВАЯ ТАБЛИЦА: Причины пересылки (для команды /why)
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS forward_reasons (
         target_msg_id INTEGER PRIMARY KEY,
@@ -109,22 +105,40 @@ client = TelegramClient("parser_session", API_ID, API_HASH)
 
 # ====== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (СИНХРОННЫЕ И АСИНХРОННЫЕ) ======
 
-def get_keywords():
-    cursor.execute("SELECT keyword FROM keywords")
+# --- ОБНОВЛЕННЫЕ ФУНКЦИИ КЛЮЧЕВЫХ СЛОВ ---
+def get_keywords(chat_id=None):
+    """
+    Получает ключевые слова.
+    Если chat_id не указан (None), возвращает только ГЛОБАЛЬНЫЕ.
+    Если указан - возвращает ГЛОБАЛЬНЫЕ (chat_id=0) + слова для конкретного чата.
+    """
+    query = "SELECT keyword FROM keywords WHERE chat_id = 0"
+    params = []
+    
+    if chat_id is not None and chat_id != 0:
+        query += " OR chat_id = ?"
+        params.append(chat_id)
+        
+    cursor.execute(query, params)
     return [row[0].lower() for row in cursor.fetchall()]
 
-def add_keyword(kw):
+def add_keyword(kw, chat_id=0):
+    """Добавляет слово. По умолчанию (chat_id=0) - глобально."""
     try:
-        cursor.execute("INSERT INTO keywords (keyword) VALUES (?)", (kw.lower(),))
+        cursor.execute("INSERT INTO keywords (chat_id, keyword) VALUES (?, ?)", (chat_id, kw.lower()))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
         return False
 
-def delete_keyword(kw):
-    cursor.execute("DELETE FROM keywords WHERE keyword = ?", (kw.lower(),))
+def delete_keyword(kw, chat_id=0):
+    """
+    Удаляет слово. По умолчанию (chat_id=0) - глобально.
+    """
+    cursor.execute("DELETE FROM keywords WHERE keyword = ? AND chat_id = ?", (kw.lower(), chat_id))
     conn.commit()
     return cursor.rowcount > 0 
+# --- КОНЕЦ ОБНОВЛЕННЫХ ФУНКЦИЙ КЛЮЧЕВЫХ СЛОВ ---
 
 def get_negwords():
     cursor.execute("SELECT negword FROM negwords")
@@ -258,6 +272,10 @@ def get_forward_reason(target_msg_id):
 async def get_chat_title(chat_id):
     """Получает название чата по ID."""
     try:
+        # Убедимся, что ID чата для entity корректен (например, не 0)
+        if chat_id == 0:
+            return "Глобальные Ключевые Слова"
+            
         entity = await client.get_entity(chat_id)
         return get_display_name(entity)
     except Exception:
@@ -312,12 +330,12 @@ async def on_message(evt: events.NewMessage.Event):
     
     text_lower = text.lower()
     
-    # Этап 1: ключевые слова
-    keywords = get_keywords()
+    # Этап 1: ключевые слова. Получаем ГЛОБАЛЬНЫЕ + слова для текущего чата
+    keywords = get_keywords(evt.chat_id)
     negwords = get_negwords()
     
     if not keywords:
-        log.debug("No keywords set, skipping message")
+        log.debug(f"No keywords set for chat {evt.chat_id}, skipping message")
         return
     
     # Находим точное совпадение для /why
@@ -358,9 +376,9 @@ async def on_message(evt: events.NewMessage.Event):
             header = f"**Монитор чатов**"
             chat_line = f"Чат: [{chat_title}]({original_link})"
             
-            # ИСПРАВЛЕНО: УБРАНЫ ОБРАТНЫЕ КАВЫЧКИ ВОКРУГ UID
+            # Форматирование отправителя: теперь без обратных кавычек вокруг ID (ИСПРАВЛЕНО)
             sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
-            sender_line = f"Отправитель: {sender_display}\nUID: {sender_info['id']}" # <-- ИСПРАВЛЕНО!
+            sender_line = f"Отправитель: {sender_display}\nUID: {sender_info['id']}" 
             
             separator = "—" * 20
             
@@ -416,14 +434,12 @@ async def on_quick_ban(evt: events.NewMessage.Event):
     try:
         replied_msg = await client.get_messages(evt.chat_id, ids=evt.reply_to_msg_id)
         
-        # 4. Ищем UID: 12345 в тексте пересланного сообщения
+        # 4. Ищем UID: 12345 в тексте пересланного сообщения (ИСПРАВЛЕНО)
         text_to_search = replied_msg.message or ""
-        # ИСПРАВЛЕНО: УПРОЩЕНО РЕГУЛЯРНОЕ ВЫРАЖЕНИЕ
         match = re.search(r'UID: (\d+)', text_to_search) 
         
         if not match:
-            # Обновлено сообщение об ошибке для ясности
-            await evt.reply("⚠️ Не удалось найти ID пользователя (UID: <ID>) в тексте этого сообщения. Проверьте форматирование.", parse_mode='md')
+            await evt.reply("⚠️ Не удалось найти ID пользователя (`UID: <ID>`) в тексте этого сообщения. Проверьте форматирование.", parse_mode='md')
             return
 
         user_id_to_ban = int(match.group(1))
@@ -482,31 +498,117 @@ async def on_command(evt: events.NewMessage.Event):
     
     cmd = parts[0].lower()
     
-    # /kw - управление ключевыми словами (без изменений)
+    # /kw - управление ключевыми словами (ИСПРАВЛЕНО)
     if cmd == "/kw":
+        
         if len(parts) < 2:
-            kws = get_keywords()
-            await evt.reply(f"📝 Ключевые слова ({len(kws)}):\n" + "\n".join(f"• {kw}" for kw in kws) if kws else "Список пуст")
+            kws = get_keywords(0) # Получаем только глобальные (chat_id=0)
+            await evt.reply(f"📝 Глобальные ключевые слова ({len(kws)}):\n" + "\n".join(f"• {kw}" for kw in kws) if kws else "Список пуст")
+            await evt.reply("Используйте: `/kw add [ID] <слово>` | `/kw del [ID] <слово>` | `/kw list [ID]`", parse_mode='md')
             return
         
         subcmd = parts[1].lower()
-        if subcmd == "add" and len(parts) == 3:
-            kw = parts[2].strip()
-            if add_keyword(kw):
-                await evt.reply(f"✓ Добавлено: {kw}")
+        target_id = 0 
+        keyword = None
+
+        
+        # --- Парсинг команды ---
+
+        if subcmd == "list":
+            # /kw list ИЛИ /kw list <ID>
+            if len(parts) == 3:
+                try:
+                    target_id = int(parts[2])
+                except ValueError:
+                    await evt.reply("⚠️ Ошибка: ID чата для /kw list должен быть числом.", parse_mode='md')
+                    return
+        
+        elif subcmd in ["add", "del"]:
+            
+            # /kw add <слово> (глобально)
+            if len(parts) == 3:
+                keyword = parts[2].strip()
+                target_id = 0
+            
+            # /kw add <ID> <слово>
+            elif len(parts) == 4: # Если команда была split(maxsplit=2), то parts[2] содержит ID и слово
+                
+                try:
+                    # Разбиваем parts[2] на ID и слово, используя maxsplit=1 для корректного парсинга
+                    id_part, keyword_part = parts[2].split(maxsplit=1)
+                    target_id = int(id_part)
+                    keyword = keyword_part.strip()
+                except ValueError:
+                    # Если parts[2] не разбилось на ID и слово
+                    await evt.reply("⚠️ Ошибка: Неверный формат. Используйте `/kw add <ID> <слово>`.", parse_mode='md')
+                    return
+            
+            else: # len(parts) < 3 для add/del
+                await evt.reply("⚠️ Неверный формат команды. Используйте: `/kw add [ID] <слово>`", parse_mode='md')
+                return
+        
+        else:
+             await evt.reply("⚠️ Неизвестная подкоманда. Используйте: `add`, `del`, `list`.", parse_mode='md')
+             return
+
+        # ----------------- ЛОГИКА ДЕЙСТВИЯ -----------------
+
+        if subcmd == "add" and keyword:
+            if add_keyword(keyword, target_id):
+                chat_name = await get_chat_title(target_id) if target_id else "Глобально"
+                await evt.reply(f"✓ Добавлено слово **'{keyword}'** для: **{chat_name}** (ID: `{target_id}`)", parse_mode='md')
             else:
-                await evt.reply(f"⚠️ Уже существует: {kw}")
-        elif subcmd == "del" and len(parts) == 3:
-            kw = parts[2].strip()
-            if delete_keyword(kw):
-                await evt.reply(f"✓ Удалено: {kw}")
+                chat_name = await get_chat_title(target_id) if target_id else "Глобально"
+                await evt.reply(f"⚠️ Уже существует: **{keyword}** для {chat_name}", parse_mode='md')
+
+        elif subcmd == "del" and keyword:
+            if delete_keyword(keyword, target_id): 
+                chat_name = await get_chat_title(target_id) if target_id else "Глобально"
+                await evt.reply(f"✓ Удалено слово **'{keyword}'** для: **{chat_name}** (ID: `{target_id}`)", parse_mode='md')
             else:
-                await evt.reply(f"⚠️ Слово не найдено: {kw}")
+                chat_name = await get_chat_title(target_id) if target_id else "Глобально"
+                await evt.reply(f"⚠️ Слово **'{keyword}'** не найдено для: {chat_name}", parse_mode='md')
+
         elif subcmd == "list":
-            kws = get_keywords()
-            await evt.reply(f"📝 Ключевые слова ({len(kws)}):\n" + "\n".join(f"• {kw}" for kw in kws) if kws else "Список пуст")
-    
-    # /neg - управление негативными словами (без изменений)
+            
+            kws_global = get_keywords(0)
+            kws_chat = get_keywords(target_id) if target_id else []
+            
+            # Уникальный список, чтобы не дублировать слова
+            unique_kws = sorted(list(set(kws_global + kws_chat)))
+            
+            if target_id == 0:
+                title = "📝 Глобальные ключевые слова"
+                
+            else:
+                chat_name = await get_chat_title(target_id)
+                title = f"📝 Ключевые слова для: **{chat_name}** (ID: `{target_id}`)"
+                
+            
+            response = f"{title} (Всего: {len(unique_kws)}):\n\n"
+            
+            # Разделяем на Global и Local для лучшей читаемости
+            if target_id != 0:
+                # Получаем только локальные слова, которых нет в глобальных
+                local_only = [kw for kw in kws_chat if kw not in kws_global]
+                
+                response += "**— Локальные слова (только для этого чата):**\n"
+                
+                if local_only:
+                     response += "\n".join(f"• {kw}" for kw in local_only) + "\n\n"
+                else:
+                    response += "*(Локальных слов нет)*\n\n"
+                
+                response += "**— Глобальные слова (наследуются):**\n"
+            
+            if kws_global:
+                response += "\n".join(f"• {kw}" for kw in kws_global)
+            elif target_id == 0:
+                response += "*(Список пуст)*"
+
+            await evt.reply(response, parse_mode='md')
+            
+    # /neg - управление негативными словами 
     elif cmd == "/neg":
         if len(parts) < 2:
             nws = get_negwords()
@@ -530,7 +632,7 @@ async def on_command(evt: events.NewMessage.Event):
             nws = get_negwords()
             await evt.reply(f"🚫 Негативные слова ({len(nws)}):\n" + "\n".join(f"• {nw}" for nw in nws) if nws else "Список пуст")
             
-    # /src - управление источниками
+    # /src - управление источниками 
     elif cmd == "/src":
         if len(parts) < 2:
             sources = list_sources()
@@ -602,7 +704,7 @@ async def on_command(evt: events.NewMessage.Event):
             await evt.reply(f"📢 Источники ({len(sources)}):\n" + 
                           "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
     
-    # /ai - управление AI правилами (без изменений)
+    # /ai - управление AI правилами 
     elif cmd == "/ai":
         if len(parts) < 2:
             await evt.reply("Используйте: /ai set <chat_id> <правило> | /ai show <chat_id> | /ai clear <chat_id>")
@@ -639,10 +741,7 @@ async def on_command(evt: events.NewMessage.Event):
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
                 
-    # /why команда была перенесена в отдельный обработчик on_command_why
-    # ...
-
-    # НОВАЯ КОМАНДА: /ban - блокировка пользователя
+    # /ban - блокировка пользователя
     elif cmd == "/ban":
         if len(parts) < 2 or parts[1].lower() == "list":
             banned_list = list_banned_users()
@@ -678,7 +777,7 @@ async def on_command(evt: events.NewMessage.Event):
                     # Получаем сообщение, на которое ответили
                     replied_msg = await client.get_messages(CONTROL_CHAT_ID, ids=evt.reply_to_msg_id)
                     # Ищем ID отправителя в тексте пересланного сообщения: ищем UID: 12345
-                    match = re.search(r'UID: (\d+)', replied_msg.message) # <-- ИСПРАВЛЕНО
+                    match = re.search(r'UID: (\d+)', replied_msg.message) 
                     if match:
                         user_id_to_ban = int(match.group(1))
                 except Exception:
@@ -768,9 +867,9 @@ async def on_command(evt: events.NewMessage.Event):
 📚 Доступные команды:
 
 --- Управление фильтрами ---
-/kw add <слово>    - добавить ключевое слово
-/kw del <слово>    - удалить ключевое слово
-/kw list           - показать все ключевые слова
+**/kw add [ID] <слово> - добавить ключевое слово (ID опционален, по умолчанию - глобально)**
+/kw del [ID] <слово> - удалить ключевое слово
+/kw list [ID]        - показать ключевые слова (ID опционален, по умолчанию - глобально)
 
 /neg add <слово>   - добавить негативное слово
 /neg del <слово>   - удалить негативное слово
