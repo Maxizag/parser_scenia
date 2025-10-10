@@ -984,27 +984,143 @@ async def on_command(evt: events.NewMessage.Event):
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
                 
-    # /owner и /бан (остаются прежними, так как управление глобально)
-    # ... (код для /owner и /бан не меняется)
+    # /owner - управление администраторами (ГЛОБАЛЬНОЕ УПРАВЛЕНИЕ)
     elif cmd == "/owner":
-        # ... (код /owner)
-        pass # Удали эту строку, когда вернешь код
+        # Команда доступна только главному администратору.
+        if not is_main_admin:
+            await evt.reply("❌ Доступ запрещен. Эту команду может использовать только главный администратор.")
+            return
 
-    elif cmd == "/бан":
-        # ... (код /бан)
-        pass # Удали эту строку, когда вернешь код
+        if len(parts) < 2:
+            await evt.reply("Используйте: `/owner add <ID>` | `/owner remove <ID>` | `/owner list`", parse_mode='md')
+            return
 
-    elif cmd == "/ban" and len(parts) >= 2 and parts[1].lower() == "remove":
-        # ... (код /ban remove)
-        pass # Удали эту строку, когда вернешь код
+        subcmd = parts[1].lower()
         
+        if subcmd == "add" and len(parts) == 3:
+            try:
+                user_id = int(parts[2])
+                user_entity = await client.get_entity(user_id)
+                username = get_display_name(user_entity)
+                
+                if add_admin(user_id, username):
+                    await evt.reply(f"✅ Пользователь **{username}** (ID: `{user_id}`) добавлен в список администраторов.", parse_mode='md')
+                else:
+                    await evt.reply(f"⚠️ Пользователь **{username}** (ID: `{user_id}`) уже был администратором.", parse_mode='md')
+
+            except ValueError:
+                await evt.reply("⚠️ Неверный формат ID пользователя. ID должен быть числом.")
+            except Exception as e:
+                await evt.reply(f"❌ Ошибка: Не удалось найти пользователя по ID. Ошибка: {e}")
+
+        elif subcmd == "remove" and len(parts) == 3:
+            try:
+                user_id = int(parts[2])
+                
+                if user_id == ADMIN_USER_ID:
+                    await evt.reply("⚠️ Вы не можете удалить из списка главного администратора (из .env).", parse_mode='md')
+                    return
+                
+                if remove_admin(user_id):
+                    await evt.reply(f"✅ Пользователь с ID `{user_id}` удален из администраторов.")
+                else:
+                    await evt.reply(f"⚠️ Пользователь с ID `{user_id}` не был в списке администраторов.")
+            except ValueError:
+                await evt.reply("⚠️ Неверный формат ID пользователя.")
+                
+        elif subcmd == "list":
+            admins = list_admins()
+            response = f"**👤 Администраторы** ({len(admins)}):\n\n"
+            response += f"**• Главный Администратор** (ID: `{ADMIN_USER_ID}`) *из .env*\n"
+            
+            for uid, username in admins:
+                if uid != ADMIN_USER_ID:
+                    response += f"• **{username}** (ID: `{uid}`)\n"
+
+            await evt.reply(response, parse_mode='md')
+
+    # /бан - управление заблокированными пользователями (ГЛОБАЛЬНО)
+    elif cmd == "/бан":
+        if len(parts) < 2:
+            await evt.reply("Используйте: `/бан <ID>` | `/ban remove <ID>` | `/список бан`", parse_mode='md')
+            return
+            
+        try:
+            user_id = int(parts[1])
+            if ban_user(user_id):
+                try:
+                    user_entity = await client.get_entity(user_id)
+                    ban_name = get_display_name(user_entity)
+                    await evt.reply(f"✅ Пользователь **{ban_name}** (ID: `{user_id}`) добавлен в список заблокированных.", parse_mode='md')
+                except Exception:
+                    await evt.reply(f"✅ Пользователь с ID `{user_id}` добавлен в список заблокированных.", parse_mode='md')
+            else:
+                await evt.reply(f"⚠️ Пользователь с ID `{user_id}` уже заблокирован.")
+        except ValueError:
+            await evt.reply("⚠️ Неверный формат ID пользователя. ID должен быть числом.")
+
+    # /ban remove - удаление из заблокированных
+    elif cmd == "/ban" and len(parts) >= 2 and parts[1].lower() == "remove":
+        if len(parts) < 3:
+            await evt.reply("Используйте: `/ban remove <ID>`", parse_mode='md')
+            return
+        
+        try:
+            user_id = int(parts[2])
+            if unban_user(user_id):
+                await evt.reply(f"✅ Пользователь с ID `{user_id}` удален из списка заблокированных.")
+            else:
+                await evt.reply(f"⚠️ Пользователь с ID `{user_id}` не был в списке заблокированных.")
+        except ValueError:
+            await evt.reply("⚠️ Неверный формат ID пользователя.")
+        
+    # /список бан - список заблокированных пользователей
     elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "бан":
-        # ... (код /список бан)
-        pass # Удали эту строку, когда вернешь код
+        banned_ids = list_banned_users()
+        response = f"🚫 **Заблокированные пользователи** ({len(banned_ids)}):\n\n"
+        
+        if not banned_ids:
+            response += "*(Список пуст)*"
+        else:
+            for uid in banned_ids:
+                try:
+                    entity = await client.get_entity(uid)
+                    response += f"• **{get_display_name(entity)}** (ID: `{uid}`)\n"
+                except Exception:
+                    response += f"• *Неизвестный пользователь* (ID: `{uid}`)\n"
+
+        await evt.reply(response, parse_mode='md')
     
+    # /help - помощь
     elif cmd == "/help":
-        # ... (код /help)
-        pass # Удали эту строку, когда вернешь код
+        response = (
+            "**🤖 Управление Мониторингом (Клиентский режим)**\n\n"
+            "**1. Ключевые слова (привязаны к этому чату):**\n"
+            "• `/+слово <слово>`: Добавить глобальное слово (сработает везде).\n"
+            "• `/+слово <ID> <слово>`: Добавить слово только для конкретного источника.\n"
+            "• `/удалить +слово <слово>`: Удалить глобальное слово.\n"
+            "• `/удалить +слово <ID> <слово>`: Удалить слово для конкретного источника.\n"
+            "• `/список слов [ID]`\n\n"
+            "**2. Исключения (привязаны к этому чату):**\n"
+            "• `/минус слово <слово>`: Добавить негативное слово.\n"
+            "• `/удалить минус слово <слово>`: Удалить негативное слово.\n"
+            "• `/список минус слов`\n\n"
+            "**3. Источники (привязаны к этому чату):**\n"
+            "• `/добавить чат <ID|ссылка>`: Начать мониторинг канала.\n"
+            "• `/удалить чат <ID|ссылка>`: Остановить мониторинг.\n"
+            "• `/список чатов`\n\n"
+            "**4. AI Фильтрация (привязана к этому чату):**\n"
+            "• `/ai set <ID> <правило>`: Установить правило AI для источника.\n"
+            "• `/ai show <ID>` / `/ai clear <ID>`\n\n"
+            "**5. Действия в чате пересылки:**\n"
+            "• Ответьте словом `бан` на сообщение, чтобы заблокировать отправителя.\n"
+            "• Ответьте `/Почему` на пересланное сообщение, чтобы увидеть причину.\n\n"
+            "**6. Глобальное администрирование (Только Главный Админ):**\n"
+            "• `/owner add <ID>` / `/owner remove <ID>` / `/owner list`\n"
+            "• `/бан <ID>` / `/ban remove <ID>` / `/список бан`\n"
+            "• `/register <control_id> <target_id> <Имя>` (Регистрация нового клиента)"
+        )
+        await evt.reply(response, parse_mode='md')
 
 
 # ====== Запуск ======
