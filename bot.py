@@ -440,10 +440,12 @@ async def on_message(evt: events.NewMessage.Event):
     source_chat_id = evt.chat_id
 
     # 1. Проверяем, есть ли вообще клиенты, которые мониторят этот источник
+    # Используем новую функцию get_clients_monitoring_source, которая возвращает список
+    # {'control_id': ID, 'target_id': ID} для всех, кто слушает source_chat_id.
     monitoring_clients = get_clients_monitoring_source(source_chat_id)
     
     if not monitoring_clients:
-        # log.debug(f"Source chat {source_chat_id} is not monitored by any active client.")
+        # Если ни один клиент не слушает этот чат, выходим
         return
     
     # 2. Проверяем базовые условия (для всех клиентов)
@@ -467,13 +469,12 @@ async def on_message(evt: events.NewMessage.Event):
         control_chat_id = client_data['control_id']
         target_chat_id = client_data['target_id']
         
-        # 3.1. Фильтрация ключевыми и негативными словами
-        keywords = get_keywords(control_chat_id, source_chat_id)
-        negwords = get_negwords(control_chat_id) # Теперь привязаны к клиенту
+        # 3.1. Фильтрация ключевыми и негативными словами (персонализированная)
+        keywords = get_keywords(control_chat_id, source_chat_id) # <- Слова только этого клиента
+        negwords = get_negwords(control_chat_id) # <- Нег. слова только этого клиента
         
-        # Если клиент не установил никаких слов, пропускаем его (не пересылаем ему)
+        # Если клиент не установил никаких слов, пропускаем его
         if not keywords:
-            # log.debug(f"Client {control_chat_id} has no keywords for source {source_chat_id}. Skipping.")
             continue
             
         match_keywords = False
@@ -494,7 +495,8 @@ async def on_message(evt: events.NewMessage.Event):
             log.info(f"✗ Filtered out for client {control_chat_id} (Negword match): {text[:50]}")
             continue
 
-        # 3.2. Проверка ИИ (с привязкой к клиенту)
+        # 3.2. Проверка ИИ (персонализированная)
+        # ai_filter теперь принимает control_chat_id для получения правильного правила
         ai_passed, ai_verdict = await ai_filter(text, source_chat_id, control_chat_id)
 
         # 3.3. Логика пересылки
@@ -506,11 +508,12 @@ async def on_message(evt: events.NewMessage.Event):
                 chat_title = await get_chat_title(source_chat_id)
                 sender_info = await get_sender_info(evt.message.sender_id)
                 
+                # Ссылка на оригинальное сообщение
                 channel_id_for_link = str(source_chat_id).replace('-100', '')
                 original_link = f"https://t.me/c/{channel_id_for_link}/{evt.id}"
 
                 # Формируем сообщение
-                header = f"**Монитор Клиента: {control_chat_id}**" # Можно добавить имя клиента
+                header = f"**Монитор Клиента: {control_chat_id}**" # Здесь можно использовать client_data['name']
                 chat_line = f"Чат: [{chat_title}]({original_link})"
                 
                 sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
@@ -548,6 +551,7 @@ async def on_message(evt: events.NewMessage.Event):
             log.info(f"✗ Filtered out for client {control_chat_id} (AI Failed): {text[:50]}... | AI: {ai_verdict}")
 
     # 4. Отмечаем сообщение как увиденное (Глобально)
+    # Это важно! Мы отмечаем сообщение как увиденное только после того, как все клиенты его обработали.
     mark_seen(msg_key)
 
     await asyncio.sleep(0.6)
