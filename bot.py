@@ -5,9 +5,10 @@ import os
 import re 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
-import openai
+import openai # <--- ИМПОРТ ДЛЯ AI
 from telethon.utils import get_peer_id
 from telethon.tl.types import User, Channel, Chat 
+import json # Добавлен для отладки
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
@@ -22,8 +23,19 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
 # OpenAI API
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# Используем асинхронный клиент, если ключ есть
 if OPENAI_API_KEY:
-   openai.api_key = OPENAI_API_KEY
+    try:
+        # Инициализация асинхронного клиента
+        client_openai = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        log.info("✓ OpenAI client initialized.")
+    except Exception as e:
+        log.error(f"Failed to initialize OpenAI client: {e}")
+        client_openai = None
+else:
+    client_openai = None
+    log.warning("⚠️ OPENAI_API_KEY not found. AI filtering will be skipped.")
+
 
 # Логирование
 logging.basicConfig(
@@ -296,10 +308,56 @@ async def get_sender_info(sender_id):
 # ------------------------------------------
 
 
-# ====== AI фильтр (ЗАГЛУШКА) ======
+# ====== AI фильтр (ТЕПЕРЬ РЕАЛЬНЫЙ) ======
 async def ai_filter(text, chat_id):
-    # Эта функция теперь всегда возвращает True, пропуская сообщение
-    return True, "SKIPPED (AI check is intentionally disabled)"
+    """
+    Отправляет текст сообщения и правило в OpenAI для проверки.
+    Возвращает (bool: прошел ли фильтр, str: вердикт ИИ).
+    """
+    # 1. Проверка клиента
+    if client_openai is None:
+        return True, "SKIPPED (OpenAI client is not initialized)"
+
+    # 2. Получение правила
+    rule = get_ai_rule(chat_id)
+    if not rule:
+        return True, "SKIPPED (No AI rule set for this chat)"
+    
+    # 3. Запрос к OpenAI
+    try:
+        
+        system_prompt = (
+            f"Ты - строгий фильтр контента. Твоя задача - определить, соответствует ли сообщение следующим правилам для чата (ID: {chat_id}): "
+            f"**Правило:** '{rule}' "
+            "Ты должен ответить только одним словом: 'ДА' или 'НЕТ'. "
+            "'ДА' означает, что сообщение СОВЕРШЕННО соответствует правилу и его нужно переслать. "
+            "'НЕТ' означает, что сообщение НЕ соответствует правилу или потенциально является спамом/негативом, и его нужно пропустить."
+        )
+        
+        response = await client_openai.chat.completions.create(
+            model="gpt-3.5-turbo", # Экономный, но быстрый
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Проверь сообщение: '{text}'"},
+            ],
+            temperature=0.0, # Делаем вердикт максимально строгим и не креативным
+            max_tokens=3 # ДА или НЕТ
+        )
+        
+        verdict = response.choices[0].message.content.strip().upper()
+        
+        if "ДА" in verdict:
+            return True, f"AI VERDICT: Passed (ДА). Rule: {rule[:30]}..."
+        else:
+            return False, f"AI VERDICT: Failed (НЕТ). Rule: {rule[:30]}..."
+
+    except Exception as e:
+        log.error(f"OpenAI API Error: {e}")
+        # В случае ошибки API пропускаем сообщение
+        return True, f"ERROR (AI API FAILED): {e}"
+
+
+# ---
 
 
 # ====== Обработка сообщений ======
@@ -356,9 +414,11 @@ async def on_message(evt: events.NewMessage.Event):
         log.debug(f"Message contains negwords: {text[:50]}")
         return
 
-    # Этап 2: проверка ИИ (теперь заглушена/пропущена)
-    ai_passed, ai_verdict = True, "SKIPPED (AI check is intentionally disabled)"
-    
+    # Этап 2: проверка ИИ (ТЕПЕРЬ АКТИВЕН)
+    ai_passed, ai_verdict = await ai_filter(text, evt.chat_id) # <--- ВЫЗОВ ФУНКЦИИ
+
+    # ---
+
     if ai_passed:
         try:
             # --- ЛОГИКА ПЕРЕСЫЛКИ: ФОРМАТИРОВАНИЕ ТЕКСТА ---
@@ -381,6 +441,10 @@ async def on_message(evt: events.NewMessage.Event):
             
             separator = "—" * 20
             
+            # Добавляем вердикт ИИ в причину пересылки
+            if "AI VERDICT" in ai_verdict:
+                forward_reason += f"\nAI Filter: {ai_verdict.replace('AI VERDICT: ', '')}"
+                
             # Собираем финальное сообщение
             final_text = (
                 f"{header}\n"
@@ -408,6 +472,7 @@ async def on_message(evt: events.NewMessage.Event):
             log.error(f"Failed to process message: {e}")
     else:
         log.info(f"✗ Filtered out from {evt.chat_id}: {text[:50]}... | AI: {ai_verdict}")
+        # Сообщение не пересылается, но отмечается как увиденное, чтобы не проверять его снова
         mark_seen(msg_key)
 
     await asyncio.sleep(0.6)
@@ -418,7 +483,7 @@ async def on_message(evt: events.NewMessage.Event):
 @client.on(events.NewMessage(chats=TARGET_CHAT_ID)) 
 async def on_quick_ban(evt: events.NewMessage.Event):
     # Проверка: сообщение должно быть ровно 'бан' (независимо от регистра)
-    if (evt.message.message or "").strip().lower() != 'бан': # <--- ИЗМЕНЕНИЕ: 'бан'
+    if (evt.message.message or "").strip().lower() != 'бан':
         return
         
     # 1. Проверка прав (только администратор)
@@ -461,7 +526,7 @@ async def on_quick_ban(evt: events.NewMessage.Event):
 # ---
 
 # ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ 'Почему' (РАБОТАЕТ В ОБОИХ ЧАТАХ) ======
-@client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/Почему')) # <--- ИЗМЕНЕНИЕ: /Почему
+@client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/Почему'))
 async def on_command_why(evt: events.NewMessage.Event):
     # Проверка: только администратор (или основной владелец из .env) может использовать команды
     if not is_admin(evt.sender_id):
@@ -498,72 +563,47 @@ async def on_command(evt: events.NewMessage.Event):
     
     cmd = parts[0].lower()
     
-    # /+слово - управление ключевыми словами
-    if cmd == "/+слово": # <--- ИЗМЕНЕНИЕ: /+слово
+    # /+слово - управление ключевыми словами (добавление)
+    if cmd == "/+слово":
         
-        # Общий синтаксис: /+слово [ID] <слово> ИЛИ /удалить +слово [ID] <слово> ИЛИ /список слов [ID]
+        subcmd = "add"
+        command_prefix = cmd
         
-        subcmd_options = {
-            "удалить": "удалить +слово", 
-            "список": "список слов",
-            "+слово": "+слово" # Для команды /+слово <ID> <слово>
-        }
-        
-        subcmd_str = parts[0].lower().lstrip('/') # Получаем: +слово
-        
-        # Если команда - /+слово, то это "add"
-        if subcmd_str == "+слово":
-            subcmd = "add"
-        else:
-            await evt.reply("⚠️ Неизвестная подкоманда для ключевых слов. Используйте: `/+слово`, `/удалить +слово`, `/список слов`.", parse_mode='md')
-            return
-            
         target_id = 0 
         keyword = None
         
-        # --- Парсинг команды ---
+        # Текст, который идет после /+слово
+        remaining_text = text[len(command_prefix):].strip()
 
-        if subcmd == "list":
-             # Если используется команда /список слов [ID]
-             # (Оставлено для совместимости, но теперь используется блок ниже)
-             # Нам нужен только ID, который может быть в parts[1] или после
-             pass 
-
-        elif subcmd in ["add", "del"]:
+        if not remaining_text:
+            await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/{cmd.lstrip('/')} [ID] <слово>`", parse_mode='md')
+            return
+        
+        # 1. Сначала пытаемся разобрать как <ID> <слово>
+        try:
+            id_part, keyword_part = remaining_text.split(maxsplit=1)
             
-            # Текст, который идет после /+слово или /удалить +слово
-            command_prefix = f"/{subcmd_options[subcmd]}" if subcmd in subcmd_options else parts[0]
-            remaining_text = text[len(command_prefix):].strip()
-
-            if not remaining_text:
-                await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/{subcmd_options[subcmd]} [ID] <слово>`", parse_mode='md')
-                return
+            # Проверяем, является ли первая часть числом (ID чата)
+            target_id = int(id_part)
+            keyword = keyword_part.strip()
             
-            # 1. Сначала пытаемся разобрать как <ID> <слово>
+        except ValueError:
+            # Если не получилось (нет пробела или не число), считаем, что это <слово> глобально
+            target_id = 0
+            keyword = remaining_text.strip()
+            
+            # Дополнительная проверка, чтобы избежать /+слово -1001810451666 (без слова)
             try:
-                id_part, keyword_part = remaining_text.split(maxsplit=1)
-                
-                # Проверяем, является ли первая часть числом (ID чата)
-                target_id = int(id_part)
-                keyword = keyword_part.strip()
-                
-            except ValueError:
-                # Если не получилось (нет пробела или не число), считаем, что это <слово> глобально
-                target_id = 0
-                keyword = remaining_text.strip()
-                
-                # Дополнительная проверка, чтобы избежать /+слово -1001810451666 (без слова)
-                try:
-                    _ = int(keyword)
-                    await evt.reply("⚠️ Неверный формат. Если вы указываете только число, оно должно быть ID, за которым следует ключевое слово.", parse_mode='md')
-                    return
-                except ValueError:
-                    pass # Отлично, это просто ключевое слово
-
-            # Финальная проверка ключевого слова
-            if not keyword:
-                await evt.reply("⚠️ Ключевое слово не может быть пустым.", parse_mode='md')
+                _ = int(keyword)
+                await evt.reply("⚠️ Неверный формат. Если вы указываете только число, оно должно быть ID, за которым следует ключевое слово.", parse_mode='md')
                 return
+            except ValueError:
+                pass # Отлично, это просто ключевое слово
+
+        # Финальная проверка ключевого слова
+        if not keyword:
+            await evt.reply("⚠️ Ключевое слово не может быть пустым.", parse_mode='md')
+            return
 
         # ----------------- ЛОГИКА ДЕЙСТВИЯ -----------------
 
@@ -578,17 +618,9 @@ async def on_command(evt: events.NewMessage.Event):
                 chat_name = await get_chat_title(target_id)
                 await evt.reply(f"⚠️ Уже существует: **{keyword}** для {chat_name}", parse_mode='md')
 
-        elif subcmd == "del" and keyword:
-            if delete_keyword(keyword, target_id): 
-                chat_name = await get_chat_title(target_id)
-                await evt.reply(f"✓ Удалено слово **'{keyword}'** для: **{chat_name}** (ID: `{target_id}`)", parse_mode='md')
-            else:
-                chat_name = await get_chat_title(target_id)
-                await evt.reply(f"⚠️ Слово **'{keyword}'** не найдено для: {chat_name}", parse_mode='md')
-
     # /удалить +слово - управление ключевыми словами (удаление)
-    elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "+слово": # <--- ИЗМЕНЕНИЕ: /удалить +слово
-        # Переиспользуем логику из блока /+слово (subcmd = "del")
+    elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "+слово":
+        
         subcmd = "del"
         command_prefix = f"{cmd} {parts[1]}"
         
@@ -599,7 +631,7 @@ async def on_command(evt: events.NewMessage.Event):
         remaining_text = text[len(command_prefix):].strip()
 
         if not remaining_text:
-            await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/удалить +слово [ID] <слово>`", parse_mode='md')
+            await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/{command_prefix.lstrip('/')} [ID] <слово>`", parse_mode='md')
             return
         
         # 1. Сначала пытаемся разобрать как <ID> <слово>
@@ -625,7 +657,7 @@ async def on_command(evt: events.NewMessage.Event):
 
 
     # /список слов - список ключевых слов
-    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "слов": # <--- ИЗМЕНЕНИЕ: /список слов
+    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "слов":
         
         target_id = 0
         # /список слов <ID>
@@ -675,7 +707,7 @@ async def on_command(evt: events.NewMessage.Event):
 
             
     # /минус слово - управление негативными словами (добавление)
-    elif cmd == "/минус" and len(parts) >= 2 and parts[1].lower() == "слово": # <--- ИЗМЕНЕНИЕ: /минус слово
+    elif cmd == "/минус" and len(parts) >= 2 and parts[1].lower() == "слово":
         
         # Проверяем, есть ли слово после /минус слово
         if len(parts) < 3:
@@ -691,7 +723,7 @@ async def on_command(evt: events.NewMessage.Event):
             await evt.reply(f"⚠️ Уже существует: {nw}")
 
     # /удалить минус слово - удаление негативных слов
-    elif cmd == "/удалить" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слово": # <--- ИЗМЕНЕНИЕ: /удалить минус слово
+    elif cmd == "/удалить" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слово":
         
         # Текст, который идет после /удалить минус слово
         command_prefix = f"{cmd} {parts[1]} {parts[2]}"
@@ -709,13 +741,13 @@ async def on_command(evt: events.NewMessage.Event):
 
 
     # /список минус слов - список негативных слов
-    elif cmd == "/список" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слов": # <--- ИЗМЕНЕНИЕ: /список минус слов
+    elif cmd == "/список" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слов":
         nws = get_negwords()
         await evt.reply(f"🚫 Негативные слова ({len(nws)}):\n" + "\n".join(f"• {nw}" for nw in nws) if nws else "Список пуст")
 
 
     # /добавить чат - управление источниками (добавление)
-    elif cmd == "/добавить" and len(parts) >= 2 and parts[1].lower() == "чат": # <--- ИЗМЕНЕНИЕ: /добавить чат
+    elif cmd == "/добавить" and len(parts) >= 2 and parts[1].lower() == "чат":
         
         if len(parts) < 3:
             sources = list_sources()
@@ -750,7 +782,7 @@ async def on_command(evt: events.NewMessage.Event):
             await evt.reply(f"⚠️ Ошибка: Не удалось найти чат по ссылке или ID. Возможно, бот не состоит в этом чате. Ошибка: {e}")
     
     # /удалить чат - управление источниками (удаление)
-    elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "чат": # <--- ИЗМЕНЕНИЕ: /удалить чат
+    elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "чат":
         
         if len(parts) < 3:
             await evt.reply("⚠️ Неверный формат команды. Используйте: `/удалить чат <id|@user|t.me/link>`", parse_mode='md')
@@ -780,12 +812,12 @@ async def on_command(evt: events.NewMessage.Event):
                 await evt.reply("⚠️ Не удалось определить ID источника. Используйте ID, @username или ссылку.")
 
     # /список чатов - список источников
-    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "чатов": # <--- ИЗМЕНЕНИЕ: /список чатов
+    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "чатов":
         sources = list_sources()
         await evt.reply(f"📢 Источники ({len(sources)}):\n" + 
                       "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
     
-    # /ai - управление AI правилами (без изменений по вашей просьбе)
+    # /ai - управление AI правилами (без изменений)
     elif cmd == "/ai":
         if len(parts) < 2:
             await evt.reply("Используйте: /ai set <chat_id> <правило> | /ai show <chat_id> | /ai clear <chat_id>")
@@ -793,6 +825,11 @@ async def on_command(evt: events.NewMessage.Event):
         
         subcmd = parts[1].lower()
         if subcmd == "set" and len(parts) == 3:
+            # Проверка наличия ключа перед установкой правила
+            if client_openai is None:
+                await evt.reply("⚠️ OPENAI_API_KEY не установлен. Правило AI не будет работать.", parse_mode='md')
+                return
+            
             try:
                 chat_id_and_rule = parts[2].split(maxsplit=1)
                 if len(chat_id_and_rule) < 2:
@@ -823,7 +860,7 @@ async def on_command(evt: events.NewMessage.Event):
                 await evt.reply("⚠️ Неверный формат ID чата")
                 
     # /бан - блокировка пользователя (добавление)
-    elif cmd == "/бан": # <--- ИЗМЕНЕНИЕ: /бан
+    elif cmd == "/бан":
         
         # Если команда /бан без аргументов ИЛИ /бан список
         if len(parts) < 2 or parts[1].lower() == "список":
@@ -864,7 +901,7 @@ async def on_command(evt: events.NewMessage.Event):
                 await evt.reply("⚠️ Не удалось определить ID пользователя. Используйте: `/бан <user_id>` или ответьте на пересланное сообщение.")
 
 
-    # /ban remove - разблокировать пользователя (без изменений по вашей просьбе)
+    # /ban remove - разблокировать пользователя (без изменений)
     elif cmd == "/ban" and len(parts) >= 2 and parts[1].lower() == "remove":
         
         if len(parts) < 3:
@@ -882,7 +919,7 @@ async def on_command(evt: events.NewMessage.Event):
         
         
     # /список бан - список заблокированных
-    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "бан": # <--- ИЗМЕНЕНИЕ: /список бан
+    elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "бан":
         banned_list = list_banned_users()
         if banned_list:
             usernames = []
@@ -897,7 +934,7 @@ async def on_command(evt: events.NewMessage.Event):
             await evt.reply("Список заблокированных пользователей пуст.")
 
 
-    # /owner - управление администраторами (без изменений по вашей просьбе)
+    # /owner - управление администраторами (без изменений)
     elif cmd == "/owner":
         if len(parts) < 2 or parts[1].lower() == "list":
             # Показываем список всех админов
@@ -970,7 +1007,7 @@ async def on_command(evt: events.NewMessage.Event):
 /удалить чат <id|@user|t.me/link> - удалить источник
 /список чатов              - показать все источники
 
-/ai set <chat_id> <правило> - установить AI фильтр (сейчас заглушен)
+/ai set <chat_id> <правило> - установить AI фильтр (требует OPENAI_API_KEY)
 /ai show <chat_id>          - показать AI правило
 /ai clear <chat_id>         - удалить AI правило
 
