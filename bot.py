@@ -5,44 +5,53 @@ import os
 import re 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
-import openai # <--- ИМПОРТ ДЛЯ AI
+import openai 
 from telethon.utils import get_peer_id
 from telethon.tl.types import User, Channel, Chat 
-import json # Добавлен для отладки
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
 
 # ====== Настройки: Сначала получаем все переменные окружения! ======
 API_ID = int(os.getenv("TG_API_ID", "0"))
+# ... (остальные переменные окружения)
 API_HASH = os.getenv("TG_API_HASH", "")
 PHONE = os.getenv("TG_PHONE", "")
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "0"))
 CONTROL_CHAT_ID = int(os.getenv("CONTROL_CHAT_ID", "0"))
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
-# OpenAI API
+# OpenAI API (Ключ также должен быть тут)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-# Используем асинхронный клиент, если ключ есть
-if OPENAI_API_KEY:
-    try:
-        # Инициализация асинхронного клиента
-        client_openai = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-        log.info("✓ OpenAI client initialized.")
-    except Exception as e:
-        log.error(f"Failed to initialize OpenAI client: {e}")
-        client_openai = None
-else:
-    client_openai = None
-    log.warning("⚠️ OPENAI_API_KEY not found. AI filtering will be skipped.")
 
-
-# Логирование
+# ====== Логирование (ПЕРЕНЕСЕНО ВВЕРХ!) ======
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-log = logging.getLogger(__name__)
+log = logging.getLogger(__name__) # <--- log теперь определен первым
+
+# ====== Инициализация OpenAI (МОЖЕТ ИСПОЛЬЗОВАТЬ log) ======
+client_openai = None 
+
+if OPENAI_API_KEY:
+    try:
+        # Инициализация асинхронного клиента
+        # Если обновление pip не помогло, попробуйте: client_openai = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        client_openai = openai.AsyncOpenAI(api_key=OPENAI_API_KEY) 
+        log.info("✓ OpenAI client initialized.")
+    except Exception as e:
+        # Теперь log определен и может быть использован
+        log.error(f"Failed to initialize OpenAI client: {e}. Check if the 'openai' package is updated.") 
+        client_openai = None
+else:
+    client_openai = None
+    log.warning("⚠️ OPENAI_API_KEY not found. AI filtering will be skipped.") 
+
+
+# ====== База данных ======
+DB_FILE = "bot_data.db"
+# ... (остальной код)
 
 # ====== База данных ======
 DB_FILE = "bot_data.db"
