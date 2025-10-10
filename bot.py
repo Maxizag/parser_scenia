@@ -5,53 +5,42 @@ import os
 import re 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
-import openai 
+import openai # Теперь используем только основной импорт
 from telethon.utils import get_peer_id
 from telethon.tl.types import User, Channel, Chat 
+import json
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
 
 # ====== Настройки: Сначала получаем все переменные окружения! ======
 API_ID = int(os.getenv("TG_API_ID", "0"))
-# ... (остальные переменные окружения)
 API_HASH = os.getenv("TG_API_HASH", "")
 PHONE = os.getenv("TG_PHONE", "")
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "0"))
 CONTROL_CHAT_ID = int(os.getenv("CONTROL_CHAT_ID", "0"))
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
-# OpenAI API (Ключ также должен быть тут)
+# OpenAI API
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# ====== Логирование (ПЕРЕНЕСЕНО ВВЕРХ!) ======
+# ====== Логирование (ПЕРЕНЕСЕНО ВВЕРХ) ======
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-log = logging.getLogger(__name__) # <--- log теперь определен первым
+log = logging.getLogger(__name__)
 
-# ====== Инициализация OpenAI (МОЖЕТ ИСПОЛЬЗОВАТЬ log) ======
-client_openai = None 
-
+# ====== Инициализация OpenAI (УНИВЕРСАЛЬНОЕ РЕШЕНИЕ) ======
+# Мы не инициализируем клиент здесь, а используем статический метод acreate()
+# Но устанавливаем API-ключ глобально для старых версий библиотеки.
 if OPENAI_API_KEY:
-    try:
-        # Инициализация асинхронного клиента
-        # Если обновление pip не помогло, попробуйте: client_openai = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-        client_openai = openai.AsyncOpenAI(api_key=OPENAI_API_KEY) 
-        log.info("✓ OpenAI client initialized.")
-    except Exception as e:
-        # Теперь log определен и может быть использован
-        log.error(f"Failed to initialize OpenAI client: {e}. Check if the 'openai' package is updated.") 
-        client_openai = None
+    openai.api_key = OPENAI_API_KEY
+    log.info("✓ OpenAI API Key set. AI filtering is active.")
 else:
-    client_openai = None
     log.warning("⚠️ OPENAI_API_KEY not found. AI filtering will be skipped.") 
-
-
-# ====== База данных ======
-DB_FILE = "bot_data.db"
-# ... (остальной код)
+    
+# client_openai здесь не нужен, так как используется статический вызов
 
 # ====== База данных ======
 DB_FILE = "bot_data.db"
@@ -317,15 +306,16 @@ async def get_sender_info(sender_id):
 # ------------------------------------------
 
 
-# ====== AI фильтр (ТЕПЕРЬ РЕАЛЬНЫЙ) ======
+# ====== AI фильтр (УНИВЕРСАЛЬНЫЙ МЕТОД ДЛЯ СТАРЫХ ВЕРСИЙ) ======
 async def ai_filter(text, chat_id):
     """
-    Отправляет текст сообщения и правило в OpenAI для проверки.
+    Отправляет текст сообщения и правило в OpenAI для проверки, используя 
+    универсальный метод ChatCompletion.acreate для совместимости с сервером.
     Возвращает (bool: прошел ли фильтр, str: вердикт ИИ).
     """
-    # 1. Проверка клиента
-    if client_openai is None:
-        return True, "SKIPPED (OpenAI client is not initialized)"
+    # 1. Проверка ключа
+    if not OPENAI_API_KEY:
+        return True, "SKIPPED (OPENAI_API_KEY not set)"
 
     # 2. Получение правила
     rule = get_ai_rule(chat_id)
@@ -343,7 +333,8 @@ async def ai_filter(text, chat_id):
             "'НЕТ' означает, что сообщение НЕ соответствует правилу или потенциально является спамом/негативом, и его нужно пропустить."
         )
         
-        response = await client_openai.chat.completions.create(
+        # --- ИСПОЛЬЗУЕМ СТАРЫЙ, УНИВЕРСАЛЬНЫЙ МЕТОД ACREATE ---
+        response = await openai.ChatCompletion.acreate( 
             model="gpt-3.5-turbo", # Экономный, но быстрый
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -352,7 +343,9 @@ async def ai_filter(text, chat_id):
             temperature=0.0, # Делаем вердикт максимально строгим и не креативным
             max_tokens=3 # ДА или НЕТ
         )
+        # --- КОНЕЦ УНИВЕРСАЛЬНОГО МЕТОДА ---
         
+        # Разбираем ответ (работает одинаково для старых и новых версий)
         verdict = response.choices[0].message.content.strip().upper()
         
         if "ДА" in verdict:
@@ -361,7 +354,7 @@ async def ai_filter(text, chat_id):
             return False, f"AI VERDICT: Failed (НЕТ). Rule: {rule[:30]}..."
 
     except Exception as e:
-        log.error(f"OpenAI API Error: {e}")
+        log.error(f"OpenAI API Error (using acreate): {e}")
         # В случае ошибки API пропускаем сообщение
         return True, f"ERROR (AI API FAILED): {e}"
 
@@ -835,7 +828,7 @@ async def on_command(evt: events.NewMessage.Event):
         subcmd = parts[1].lower()
         if subcmd == "set" and len(parts) == 3:
             # Проверка наличия ключа перед установкой правила
-            if client_openai is None:
+            if not OPENAI_API_KEY:
                 await evt.reply("⚠️ OPENAI_API_KEY не установлен. Правило AI не будет работать.", parse_mode='md')
                 return
             
