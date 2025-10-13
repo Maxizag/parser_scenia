@@ -25,19 +25,29 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 # OpenAI API
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# ====== Логирование ======
+# ==============================================================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ (В КОНСОЛЬ И В ФАЙЛ)
+# ==============================================================================
 logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    handlers=[
+        # 1. Запись логов в файл "bot.log" (создаст его, если нет)
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        # 2. Вывод логов в консоль (StreamHandler)
+        logging.StreamHandler()
+    ]
 )
 log = logging.getLogger(__name__)
 
-# ====== Инициализация OpenAI (УНИВЕРСАЛЬНОЕ РЕШЕНИЕ) ======
+# ==============================================================================
+# ИНИЦИАЛИЗАЦИЯ OpenAI
+# ==============================================================================
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
     log.info("✓ OpenAI API Key set. AI filtering is active.")
 else:
-    log.warning("⚠️ OPENAI_API_KEY not found. AI filtering will be skipped.") 
+    log.warning("⚠️ OPENAI_API_KEY not found. AI filtering will be skipped.")
 
 # ====== База данных (НОВАЯ МУЛЬТИКЛИЕНТСКАЯ СТРУКТУРА) ======
 DB_FILE = "bot_data.db"
