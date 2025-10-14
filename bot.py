@@ -28,6 +28,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # ==============================================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ (В КОНСОЛЬ И В ФАЙЛ)
 # ==============================================================================
+# Эта настройка будет записывать логи в bot.log и выводить их в консоль.
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -191,7 +192,7 @@ def get_keywords(control_chat_id, source_chat_id=None):
     params = [control_chat_id]
     
     if source_chat_id is not None and source_chat_id != 0:
-        query += " OR (control_chat_id = ? AND source_chat_id = ?)"
+        query += " UNION SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = ?" # Используем UNION для объединения
         params.extend([control_chat_id, source_chat_id])
         
     cursor.execute(query, params)
@@ -523,7 +524,8 @@ async def on_message(evt: events.NewMessage.Event):
                 original_link = f"https://t.me/c/{channel_id_for_link}/{evt.id}"
 
                 # Формируем сообщение
-                header = f"**Монитор Клиента: {control_chat_id}**" # Здесь можно использовать client_data['name']
+                # Используем client_data['name'] для более дружелюбного заголовка
+                header = f"**Монитор Клиента: {client_data['name']}**" 
                 chat_line = f"Чат: [{chat_title}]({original_link})"
                 
                 sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
@@ -571,33 +573,29 @@ async def on_message(evt: events.NewMessage.Event):
 # ====== БЫСТРАЯ КОМАНДА 'бан' В ЦЕЛЕВОМ ЧАТЕ (TARGET_CHAT_ID) ======
 @client.on(events.NewMessage(chats=TARGET_CHAT_ID)) 
 async def on_quick_ban(evt: events.NewMessage.Event):
-    # Эта команда работает только в старом TARGET_CHAT_ID (главного клиента), 
-    # или нужно будет переделать обработчик для всех target_chat_id
-    
-    # 1. Определяем, в каком чате пришла команда
-    client_data = get_client_by_control(evt.chat_id)
+    # Эта команда пока работает только в старом TARGET_CHAT_ID (главного клиента)
     
     # Если команда пришла в целевой чат, но мы не знаем, чей он, игнорируем.
-    # TODO: Здесь нужно будет проверить, является ли evt.chat_id одним из target_chat_id
-    # Пока оставим только для старого TARGET_CHAT_ID
     if evt.chat_id != TARGET_CHAT_ID:
          # Игнорируем, пока не решим, как правильно определять TargetChat
          return
 
-    # ... (Остальной код quick_ban остается прежним, так как бан глобальный) ...
+    # ... (Остальной код quick_ban) ...
     if (evt.message.message or "").strip().lower() != 'бан':
         return
         
+    # Важно: тут проверяем админа ГЛОБАЛЬНО
     if not is_admin(evt.sender_id):
         return
     
     if not evt.reply_to_msg_id:
+        await evt.reply("Используйте 'бан', ответив на пересланное ботом сообщение.", parse_mode='md')
         return
 
     try:
         replied_msg = await client.get_messages(evt.chat_id, ids=evt.reply_to_msg_id)
         text_to_search = replied_msg.message or ""
-        match = re.search(r'UID: (\d+)', text_to_search) 
+        match = re.search(r'UID: (\d+)', text_to_search)
         
         if not match:
             await evt.reply("⚠️ Не удалось найти ID пользователя (`UID: <ID>`) в тексте этого сообщения. Проверьте форматирование.", parse_mode='md')
@@ -621,10 +619,12 @@ async def on_quick_ban(evt: events.NewMessage.Event):
 
 # ---
 
-# ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ 'Почему' (Пока только в старых чатах) ======
+# ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ 'Почему' ======
 @client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/Почему'))
 async def on_command_why(evt: events.NewMessage.Event):
-    # TODO: Здесь также нужно будет переделать логику для работы во всех target_chat_id клиентов
+    # Эта команда пока работает только в старых чатах (CONTROL_CHAT_ID и TARGET_CHAT_ID)
+    
+    # Проверяем админа ГЛОБАЛЬНО
     if not is_admin(evt.sender_id):
         return
     
@@ -671,7 +671,8 @@ async def on_command(evt: events.NewMessage.Event):
         # Должно быть отловлено выше, но на всякий случай
         return 
 
-    # Если команда от клиента, то он должен быть админом в своем чате
+    # Если команда от клиента, то он должен быть админом в списке администраторов (Глобально)
+    # *Это сделано, чтобы избежать регистрации левых пользователей, которые знают ID чата.*
     if is_client_command and not is_admin(evt.sender_id):
          await evt.reply("❌ У вас нет прав для управления ботом в этом чате. Обратитесь к главному администратору.")
          return
@@ -742,11 +743,12 @@ async def on_command(evt: events.NewMessage.Event):
             keyword = remaining_text.strip()
             
             try:
+                # Если введен только один аргумент, проверяем, не число ли это. Если число - это не слово
                 _ = int(keyword)
                 await evt.reply("⚠️ Неверный формат. Если вы указываете только число, оно должно быть ID, за которым следует ключевое слово.", parse_mode='md')
                 return
             except ValueError:
-                pass
+                pass # Это ключевое слово (не число), используем его как ключевое слово
 
         if not keyword:
             await evt.reply("⚠️ Ключевое слово не может быть пустым.", parse_mode='md')
@@ -809,9 +811,18 @@ async def on_command(evt: events.NewMessage.Event):
                 
         # Получаем слова с привязкой к клиенту
         kws_global = get_keywords(control_chat_id, 0)
-        kws_chat = get_keywords(control_chat_id, source_chat_id) if source_chat_id else []
         
-        unique_kws = sorted(list(set(kws_global + kws_chat)))
+        if source_chat_id != 0:
+            kws_local = get_keywords(control_chat_id, source_chat_id)
+            # Уникальные слова, которые есть только в локальном, но не в глобальном списке
+            local_only = [kw for kw in kws_local if kw not in kws_global]
+            # Все слова
+            unique_kws = sorted(list(set(kws_global + local_only))) 
+        else:
+            kws_local = []
+            local_only = []
+            unique_kws = sorted(kws_global)
+            
         
         if source_chat_id == 0:
             title = f"📝 Глобальные ключевые слова [Клиент: `{control_chat_id}`]"
@@ -823,7 +834,6 @@ async def on_command(evt: events.NewMessage.Event):
         response = f"{title} (Всего: {len(unique_kws)}):\n\n"
         
         if source_chat_id != 0:
-            local_only = [kw for kw in kws_chat if kw not in kws_global]
             
             response += "**— Локальные слова (только для этого источника):**\n"
             
@@ -901,6 +911,7 @@ async def on_command(evt: events.NewMessage.Event):
             
             source_chat_id = entity.id 
             if source_chat_id > 0: 
+                # Получаем правильный ID канала/группы
                 source_chat_id = get_peer_id(entity, add_mark=True)
             
             title = get_display_name(entity)
@@ -1139,6 +1150,11 @@ async def on_command(evt: events.NewMessage.Event):
 
 # ====== Запуск ======
 async def main():
+    # Проверка, что API_ID и API_HASH были загружены
+    if API_ID == 0 or not API_HASH:
+        log.error("CRITICAL: API_ID or API_HASH is empty. Check your .env file!")
+        return
+        
     await client.start(phone=PHONE)
     me = await client.get_me()
     log.info(f"✓ Started as {me.id} @ {get_display_name(me)}")
@@ -1161,4 +1177,5 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         log.info("Shutting down...")
     finally:
+        log.info("Database connection closed.")
         conn.close()
