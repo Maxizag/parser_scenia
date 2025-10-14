@@ -58,75 +58,79 @@ def init_db():
     cursor = conn.cursor()
     
     # КОД СОЗДАНИЯ ВСЕХ ВАШИХ ТАБЛИЦ ПЕРЕНЕСЕН СЮДА:
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS clients (
-            client_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            control_chat_id INTEGER UNIQUE NOT NULL,  
-            target_chat_id INTEGER UNIQUE NOT NULL,  
-            name TEXT,
-            is_active INTEGER DEFAULT 1
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS keywords (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            control_chat_id INTEGER NOT NULL,  
-            source_chat_id INTEGER NOT NULL,   
-            keyword TEXT NOT NULL,
-            UNIQUE(control_chat_id, source_chat_id, keyword) 
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS negwords (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            control_chat_id INTEGER NOT NULL, 
-            negword TEXT NOT NULL,
-            UNIQUE(control_chat_id, negword)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sources (
-            source_chat_id INTEGER NOT NULL,      
-            control_chat_id INTEGER NOT NULL,     
-            chat_title TEXT,
-            PRIMARY KEY (source_chat_id, control_chat_id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS seen_messages (
-            msg_key TEXT PRIMARY KEY,
-            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ai_rules (
-            source_chat_id INTEGER NOT NULL,      
-            control_chat_id INTEGER NOT NULL,     
-            rule TEXT NOT NULL,
-            PRIMARY KEY (source_chat_id, control_chat_id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS banned_users (
-            user_id INTEGER PRIMARY KEY
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admins (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS forward_reasons (
-            target_msg_id INTEGER PRIMARY KEY,
-            reason TEXT
-        )
-    """)
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS clients (
+                client_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                control_chat_id INTEGER UNIQUE NOT NULL,  
+                target_chat_id INTEGER UNIQUE NOT NULL,  
+                name TEXT,
+                is_active INTEGER DEFAULT 1
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS keywords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                control_chat_id INTEGER NOT NULL,  
+                source_chat_id INTEGER NOT NULL,   
+                keyword TEXT NOT NULL,
+                UNIQUE(control_chat_id, source_chat_id, keyword) 
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS negwords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                control_chat_id INTEGER NOT NULL, 
+                negword TEXT NOT NULL,
+                UNIQUE(control_chat_id, negword)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sources (
+                source_chat_id INTEGER NOT NULL,      
+                control_chat_id INTEGER NOT NULL,     
+                chat_title TEXT,
+                PRIMARY KEY (source_chat_id, control_chat_id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS seen_messages (
+                msg_key TEXT PRIMARY KEY,
+                timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_rules (
+                source_chat_id INTEGER NOT NULL,      
+                control_chat_id INTEGER NOT NULL,     
+                rule TEXT NOT NULL,
+                PRIMARY KEY (source_chat_id, control_chat_id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS banned_users (
+                user_id INTEGER PRIMARY KEY
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS forward_reasons (
+                target_msg_id INTEGER PRIMARY KEY,
+                reason TEXT
+            )
+        """)
 
-    conn.commit()
-    conn.close()
-    log.info("Database tables initialized.")
+        conn.commit()
+        log.info("Database tables initialized.")
+    except Exception as e:
+        log.error(f"FATAL DB ERROR during initialization: {e}")
+    finally:
+        conn.close()
 
 
 # ====== Клиент ======
@@ -155,6 +159,9 @@ def add_client(control_id, target_id, name=""):
         return True
     except sqlite3.IntegrityError:
         return False
+    except Exception as e:
+        log.error(f"DB ERROR (add_client): {e}")
+        return False
     finally:
         conn.close()
 
@@ -170,6 +177,9 @@ def get_client_by_control(control_id):
         if row:
             return {'control_id': row[0], 'target_id': row[1], 'name': row[2]}
         return None
+    except Exception as e:
+        log.error(f"DB ERROR (get_client_by_control): {e}")
+        return None
     finally:
         conn.close()
 
@@ -182,13 +192,17 @@ def get_clients_monitoring_source(source_id):
         cursor.execute("""
             SELECT 
                 c.control_chat_id, 
-                c.target_chat_id 
+                c.target_chat_id,
+                c.name 
             FROM clients c
             JOIN sources s ON c.control_chat_id = s.control_chat_id
             WHERE s.source_chat_id = ? AND c.is_active = 1
         """, (source_id,))
         
-        return [{'control_id': row[0], 'target_id': row[1]} for row in cursor.fetchall()]
+        return [{'control_id': row[0], 'target_id': row[1], 'name': row[2]} for row in cursor.fetchall()]
+    except Exception as e:
+        log.error(f"DB ERROR (get_clients_monitoring_source): {e}")
+        return []
     finally:
         conn.close()
 
@@ -209,6 +223,9 @@ def get_keywords(control_chat_id, source_chat_id=None):
             
         cursor.execute(query, params)
         return [row[0].lower() for row in cursor.fetchall()]
+    except Exception as e:
+        log.error(f"DB ERROR (get_keywords): {e}")
+        return []
     finally:
         conn.close()
 
@@ -224,6 +241,9 @@ def add_keyword(kw, control_chat_id, source_chat_id=0):
         return True
     except sqlite3.IntegrityError:
         return False
+    except Exception as e:
+        log.error(f"DB ERROR (add_keyword): {e}")
+        return False
     finally:
         conn.close()
 
@@ -237,6 +257,9 @@ def delete_keyword(kw, control_chat_id, source_chat_id=0):
                       (kw.lower(), control_chat_id, source_chat_id))
         conn.commit()
         return cursor.rowcount > 0 
+    except Exception as e:
+        log.error(f"DB ERROR (delete_keyword): {e}")
+        return False
     finally:
         conn.close()
 
@@ -249,6 +272,9 @@ def get_negwords(control_chat_id):
     try:
         cursor.execute("SELECT negword FROM negwords WHERE control_chat_id = ?", (control_chat_id,))
         return [row[0].lower() for row in cursor.fetchall()]
+    except Exception as e:
+        log.error(f"DB ERROR (get_negwords): {e}")
+        return []
     finally:
         conn.close()
 
@@ -263,6 +289,9 @@ def add_negword(nw, control_chat_id):
         return True
     except sqlite3.IntegrityError:
         return False
+    except Exception as e:
+        log.error(f"DB ERROR (add_negword): {e}")
+        return False
     finally:
         conn.close()
 
@@ -275,6 +304,9 @@ def delete_negword(nw, control_chat_id):
         cursor.execute("DELETE FROM negwords WHERE negword = ? AND control_chat_id = ?", (nw.lower(), control_chat_id))
         conn.commit()
         return cursor.rowcount > 0 
+    except Exception as e:
+        log.error(f"DB ERROR (delete_negword): {e}")
+        return False
     finally:
         conn.close()
 
@@ -287,6 +319,9 @@ def list_sources(control_chat_id):
     try:
         cursor.execute("SELECT source_chat_id, chat_title FROM sources WHERE control_chat_id = ?", (control_chat_id,))
         return cursor.fetchall()
+    except Exception as e:
+        log.error(f"DB ERROR (list_sources): {e}")
+        return []
     finally:
         conn.close()
 
@@ -301,7 +336,7 @@ def add_source(source_chat_id, control_chat_id, chat_title):
         conn.commit()
         return True
     except Exception as e:
-        log.error(f"Error adding source: {e}")
+        log.error(f"DB ERROR (add_source): {e}")
         return False
     finally:
         conn.close()
@@ -315,6 +350,9 @@ def delete_source(source_chat_id, control_chat_id):
         cursor.execute("DELETE FROM sources WHERE source_chat_id = ? AND control_chat_id = ?", (source_chat_id, control_chat_id))
         conn.commit()
         return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"DB ERROR (delete_source): {e}")
+        return False
     finally:
         conn.close()
 
@@ -329,6 +367,9 @@ def get_ai_rule(source_chat_id, control_chat_id):
                       (source_chat_id, control_chat_id))
         row = cursor.fetchone()
         return row[0] if row else None
+    except Exception as e:
+        log.error(f"DB ERROR (get_ai_rule): {e}")
+        return None
     finally:
         conn.close()
 
@@ -341,6 +382,8 @@ def set_ai_rule(source_chat_id, control_chat_id, rule):
         cursor.execute("INSERT OR REPLACE INTO ai_rules (source_chat_id, control_chat_id, rule) VALUES (?, ?, ?)", 
                       (source_chat_id, control_chat_id, rule))
         conn.commit()
+    except Exception as e:
+        log.error(f"DB ERROR (set_ai_rule): {e}")
     finally:
         conn.close()
 
@@ -353,6 +396,8 @@ def clear_ai_rule(source_chat_id, control_chat_id):
         cursor.execute("DELETE FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
                       (source_chat_id, control_chat_id))
         conn.commit()
+    except Exception as e:
+        log.error(f"DB ERROR (clear_ai_rule): {e}")
     finally:
         conn.close()
 
@@ -365,6 +410,9 @@ def is_seen(msg_key):
     try:
         cursor.execute("SELECT 1 FROM seen_messages WHERE msg_key = ?", (msg_key,))
         return cursor.fetchone() is not None
+    except Exception as e:
+        log.error(f"DB ERROR (is_seen): {e}")
+        return False
     finally:
         conn.close()
 
@@ -376,6 +424,8 @@ def mark_seen(msg_key):
     try:
         cursor.execute("INSERT OR IGNORE INTO seen_messages (msg_key) VALUES (?)", (msg_key,))
         conn.commit()
+    except Exception as e:
+        log.error(f"DB ERROR (mark_seen): {e}")
     finally:
         conn.close()
 
@@ -390,6 +440,9 @@ def is_admin(user_id):
     try:
         cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
         return cursor.fetchone() is not None
+    except Exception as e:
+        log.error(f"DB ERROR (is_admin): {e}")
+        return False
     finally:
         conn.close()
 
@@ -403,7 +456,8 @@ def add_admin(user_id, username):
                       (user_id, username))
         conn.commit()
         return cursor.rowcount > 0
-    except Exception:
+    except Exception as e:
+        log.error(f"DB ERROR (add_admin): {e}")
         return False
     finally:
         conn.close()
@@ -417,6 +471,9 @@ def remove_admin(user_id):
         cursor.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
         conn.commit()
         return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"DB ERROR (remove_admin): {e}")
+        return False
     finally:
         conn.close()
 
@@ -428,6 +485,9 @@ def list_admins():
     try:
         cursor.execute("SELECT user_id, username FROM admins")
         return cursor.fetchall()
+    except Exception as e:
+        log.error(f"DB ERROR (list_admins): {e}")
+        return []
     finally:
         conn.close()
 
@@ -439,6 +499,9 @@ def is_banned(user_id):
     try:
         cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
         return cursor.fetchone() is not None
+    except Exception as e:
+        log.error(f"DB ERROR (is_banned): {e}")
+        return False
     finally:
         conn.close()
 
@@ -451,7 +514,8 @@ def ban_user(user_id):
         cursor.execute("INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)", (user_id,))
         conn.commit()
         return True
-    except Exception:
+    except Exception as e:
+        log.error(f"DB ERROR (ban_user): {e}")
         return False
     finally:
         conn.close()
@@ -465,6 +529,9 @@ def unban_user(user_id):
         cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
         conn.commit()
         return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"DB ERROR (unban_user): {e}")
+        return False
     finally:
         conn.close()
 
@@ -476,6 +543,9 @@ def list_banned_users():
     try:
         cursor.execute("SELECT user_id FROM banned_users")
         return [row[0] for row in cursor.fetchall()]
+    except Exception as e:
+        log.error(f"DB ERROR (list_banned_users): {e}")
+        return []
     finally:
         conn.close()
 
@@ -488,6 +558,8 @@ def store_forward_reason(target_msg_id, reason):
         cursor.execute("INSERT OR REPLACE INTO forward_reasons (target_msg_id, reason) VALUES (?, ?)", 
                       (target_msg_id, reason))
         conn.commit()
+    except Exception as e:
+        log.error(f"DB ERROR (store_forward_reason): {e}")
     finally:
         conn.close()
 
@@ -500,6 +572,9 @@ def get_forward_reason(target_msg_id):
         cursor.execute("SELECT reason FROM forward_reasons WHERE target_msg_id = ?", (target_msg_id,))
         row = cursor.fetchone()
         return row[0] if row else None
+    except Exception as e:
+        log.error(f"DB ERROR (get_forward_reason): {e}")
+        return None
     finally:
         conn.close()
 
@@ -580,7 +655,7 @@ async def ai_filter(text, source_chat_id, control_chat_id):
             return False, f"AI VERDICT: Failed (НЕТ). Rule: {rule[:30]}..."
 
     except Exception as e:
-        log.error(f"OpenAI API Error (acreate): {e}")
+        log.error(f"OpenAI API Error (acreate) for client {control_chat_id}: {e}")
         return True, f"ERROR (AI API FAILED): {e}"
 
 
@@ -600,6 +675,7 @@ async def on_message(evt: events.NewMessage.Event):
     
     # 2. Проверяем базовые условия (для всех клиентов) (await!)
     msg_key = f"{source_chat_id}:{evt.id}"
+    # Проверяем, был ли ключ отработан в этой сессии ранее (для предотвращения дублирования)
     if await is_seen(msg_key):
         return
 
@@ -624,6 +700,7 @@ async def on_message(evt: events.NewMessage.Event):
         negwords = await get_negwords(control_chat_id) 
         
         if not keywords:
+            log.debug(f"Skipping client {control_chat_id}: No keywords set.")
             continue
             
         match_keywords = False
@@ -646,6 +723,14 @@ async def on_message(evt: events.NewMessage.Event):
 
         # 3.2. Проверка ИИ (персонализированная)
         ai_passed, ai_verdict = await ai_filter(text, source_chat_id, control_chat_id)
+        
+        # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ РЕЗУЛЬТАТА AI !!!
+        log.info(
+            f"AI CHECK for client {control_chat_id} (Source: {source_chat_id}, KW Match): "
+            f"Verdict: {ai_verdict} | Msg: {text[:50]}..."
+        )
+        # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
+
 
         # 3.3. Логика пересылки
         if ai_passed:
@@ -654,12 +739,15 @@ async def on_message(evt: events.NewMessage.Event):
                 chat_title = await get_chat_title(source_chat_id)
                 sender_info = await get_sender_info(evt.message.sender_id)
                 
+                # ИСПРАВЛЕНИЕ: Безопасно получаем имя клиента (устраняет ошибку 'name')
+                client_name = client_data.get('name', f"Клиент {control_chat_id}")
+                
                 # Ссылка на оригинальное сообщение
                 channel_id_for_link = str(source_chat_id).replace('-100', '')
                 original_link = f"https://t.me/c/{channel_id_for_link}/{evt.id}"
 
                 # Формируем сообщение
-                header = f"**Монитор Клиента: {client_data['name']}**" 
+                header = f"**Монитор Клиента: {client_name}**" 
                 chat_line = f"Чат: [{chat_title}]({original_link})"
                 
                 sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
@@ -667,8 +755,8 @@ async def on_message(evt: events.NewMessage.Event):
                 
                 separator = "—" * 20
                 
-                if "AI VERDICT" in ai_verdict:
-                    forward_reason += f"\nAI Filter: {ai_verdict.replace('AI VERDICT: ', '')}"
+                if "AI VERDICT" in ai_verdict or "SKIPPED" in ai_verdict:
+                    forward_reason += f"\nAI Filter: {ai_verdict.replace('AI VERDICT: ', '').replace('SKIPPED ', '(Skipped) ')}"
                     
                 final_text = (
                     f"{header}\n"
@@ -688,14 +776,20 @@ async def on_message(evt: events.NewMessage.Event):
                 # Сохраняем причину (await!)
                 await store_forward_reason(sent_msg.id, forward_reason)
 
-                log.info(f"✓ Sent to client {control_chat_id} from {source_chat_id}: {text[:50]}... | AI: {ai_verdict}")
+                log.info(f"✓ FORWARDED to client {control_chat_id} (Source {source_chat_id})") 
                 
             except Exception as e:
-                log.error(f"Failed to process message for client {control_chat_id}: {e}")
+                # ВАЖНО: Логируем подробную ошибку при отправке/форматировании
+                log.error(f"Failed to format or send message for client {control_chat_id} to target {target_chat_id}: {e}")
+                # Если сбой отправки, не отмечаем сообщение как увиденное для других клиентов
+                continue 
         else:
-            log.info(f"✗ Filtered out for client {control_chat_id} (AI Failed): {text[:50]}... | AI: {ai_verdict}")
+            log.info(f"✗ FILTER STOPPED: AI check failed for client {control_chat_id}")
+
 
     # 4. Отмечаем сообщение как увиденное (Глобально) (await!)
+    # Этот код выполняется только один раз, после успешной обработки для всех клиентов,
+    # что гарантирует, что мы не обработаем сообщение повторно.
     await mark_seen(msg_key)
 
     await asyncio.sleep(0.6)
@@ -738,10 +832,13 @@ async def on_quick_ban(evt: events.NewMessage.Event):
                 entity = await client.get_entity(user_id_to_ban)
                 ban_name = get_display_name(entity)
                 await evt.reply(f"✅ **Быстрый БАН!** Сообщения от **{ban_name}** (ID: `{user_id_to_ban}`) будут игнорироваться.", parse_mode='md')
+                log.info(f"CMD SUCCESS: Quick banned user {user_id_to_ban}")
             except Exception:
                 await evt.reply(f"✅ **Быстрый БАН!** Сообщения от ID `{user_id_to_ban}` будут игнорироваться.", parse_mode='md')
+                log.info(f"CMD SUCCESS: Quick banned user {user_id_to_ban} (No Entity)")
         else:
             await evt.reply(f"⚠️ Пользователь ID `{user_id_to_ban}` уже был заблокирован.", parse_mode='md')
+            log.warning(f"CMD CONFLICT: Quick ban failed, user {user_id_to_ban} already banned.")
 
     except Exception as e:
         log.error(f"Error during quick ban: {e}")
@@ -837,13 +934,16 @@ async def on_command(evt: events.NewMessage.Event):
                                 f"Чат команд: `{control_id}`\n"
                                 f"Чат пересылки: `{target_id}`\n"
                                 f"Не забудьте добавить его ID в **администраторы** (`/owner add <ID>`) в его чате команд!", parse_mode='md')
+                log.info(f"CMD SUCCESS: Registered new client: {name} (Control: {control_id})")
             else:
                 await evt.reply(f"⚠️ Клиент с чатом команд `{control_id}` или чатом пересылки `{target_id}` уже существует.", parse_mode='md')
+                log.warning(f"CMD CONFLICT: Registration failed for client {control_id} (already exists).")
 
         except ValueError:
             await evt.reply("⚠️ ID чатов должны быть числами.")
         except Exception as e:
             await evt.reply(f"❌ Ошибка регистрации: {e}")
+            log.error(f"CMD ERROR: Failed to register client: {e}")
             
     # /+слово (await!)
     elif cmd == "/+слово":
@@ -883,13 +983,13 @@ async def on_command(evt: events.NewMessage.Event):
             # await!)
             if await add_keyword(keyword, control_chat_id, source_chat_id): 
                 chat_name = await get_chat_title(source_chat_id)
-                # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ УСПЕХА !!!
+                # !!! ЛОГИРОВАНИЕ УСПЕХА !!!
                 log.info(f"CMD SUCCESS: Client {control_chat_id} added keyword '{keyword}' for source {source_chat_id}")
                 # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
                 await evt.reply(f"✓ Добавлено слово **'{keyword}'** для: **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
             else:
                 chat_name = await get_chat_title(source_chat_id)
-                # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ КОНФЛИКТА/ПОВТОРА !!!
+                # !!! ЛОГИРОВАНИЕ КОНФЛИКТА/ПОВТОРА !!!
                 log.warning(f"CMD CONFLICT: Client {control_chat_id} failed to add keyword '{keyword}' (already exists) for source {source_chat_id}")
                 # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
                 await evt.reply(f"⚠️ Уже существует: **{keyword}** для {chat_name} [Клиент: `{control_chat_id}`]", parse_mode='md')
@@ -924,13 +1024,13 @@ async def on_command(evt: events.NewMessage.Event):
         # await!)
         if await delete_keyword(keyword, control_chat_id, source_chat_id): 
             chat_name = await get_chat_title(source_chat_id)
-            # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ УСПЕХА !!!
+            # !!! ЛОГИРОВАНИЕ УСПЕХА !!!
             log.info(f"CMD SUCCESS: Client {control_chat_id} deleted keyword '{keyword}' for source {source_chat_id}")
             # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
             await evt.reply(f"✓ Удалено слово **'{keyword}'** для: **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
         else:
             chat_name = await get_chat_title(source_chat_id)
-            # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ НЕУДАЧИ !!!
+            # !!! ЛОГИРОВАНИЕ НЕУДАЧИ !!!
             log.warning(f"CMD FAILED: Client {control_chat_id} failed to delete keyword '{keyword}' (not found) for source {source_chat_id}")
             # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
             await evt.reply(f"⚠️ Слово **'{keyword}'** не найдено для: {chat_name} [Клиент: `{control_chat_id}`]", parse_mode='md')
@@ -987,6 +1087,7 @@ async def on_command(evt: events.NewMessage.Event):
             response += "*(Список пуст)*"
 
         await evt.reply(response, parse_mode='md')
+        log.info(f"CMD SUCCESS: Client {control_chat_id} viewed keyword list for source {source_chat_id}")
 
             
     # /минус слово (await!)
@@ -1003,8 +1104,10 @@ async def on_command(evt: events.NewMessage.Event):
         # await!)
         if await add_negword(nw, control_chat_id): 
             await evt.reply(f"✓ Добавлено негативное слово: {nw} [Клиент: `{control_chat_id}`]")
+            log.info(f"CMD SUCCESS: Client {control_chat_id} added negword '{nw}'")
         else:
             await evt.reply(f"⚠️ Уже существует: {nw} [Клиент: `{control_chat_id}`]")
+            log.warning(f"CMD CONFLICT: Client {control_chat_id} failed to add negword '{nw}' (already exists)")
 
     # /удалить минус слово (await!)
     elif cmd == "/удалить" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слово":
@@ -1020,8 +1123,10 @@ async def on_command(evt: events.NewMessage.Event):
         # await!)
         if await delete_negword(nw, control_chat_id): 
             await evt.reply(f"✓ Удалено негативное слово: {nw} [Клиент: `{control_chat_id}`]")
+            log.info(f"CMD SUCCESS: Client {control_chat_id} deleted negword '{nw}'")
         else:
             await evt.reply(f"⚠️ Слово не найдено: {nw} [Клиент: `{control_chat_id}`]")
+            log.warning(f"CMD FAILED: Client {control_chat_id} failed to delete negword '{nw}' (not found)")
 
 
     # /список минус слов (await!)
@@ -1029,6 +1134,7 @@ async def on_command(evt: events.NewMessage.Event):
         # await!)
         nws = await get_negwords(control_chat_id) 
         await evt.reply(f"🚫 Негативные слова [Клиент: `{control_chat_id}`] ({len(nws)}):\n" + "\n".join(f"• {nw}" for nw in nws) if nws else "Список пуст", parse_mode='md')
+        log.info(f"CMD SUCCESS: Client {control_chat_id} viewed negword list")
 
 
     # /добавить чат (await!)
@@ -1060,13 +1166,16 @@ async def on_command(evt: events.NewMessage.Event):
             # await!)
             if await add_source(source_chat_id, control_chat_id, title): 
                 await evt.reply(f"✓ Добавлен источник: **{title}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
+                log.info(f"CMD SUCCESS: Client {control_chat_id} added source {source_chat_id}")
             else:
                 await evt.reply(f"⚠️ Ошибка добавления источника")
+                log.error(f"CMD ERROR: Client {control_chat_id} failed to add source {source_chat_id}")
         
         except ValueError:
             await evt.reply("⚠️ Неверный формат ID/ссылки.")
         except Exception as e:
             await evt.reply(f"⚠️ Ошибка: Не удалось найти чат по ссылке или ID. Возможно, бот не состоит в этом чате. Ошибка: {e}")
+            log.error(f"CMD ERROR: Client {control_chat_id} failed to resolve source {chat_input}: {e}")
     
     # /удалить чат (await!)
     elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "чат":
@@ -1085,8 +1194,10 @@ async def on_command(evt: events.NewMessage.Event):
             # await!)
             if await delete_source(source_chat_id, control_chat_id): 
                 await evt.reply(f"✓ Источник `{source_chat_id}` (**{get_display_name(entity)}**) удален [Клиент: `{control_chat_id}`].", parse_mode='md')
+                log.info(f"CMD SUCCESS: Client {control_chat_id} deleted source {source_chat_id}")
             else:
                 await evt.reply(f"⚠️ Источник `{source_chat_id}` не найден в списке [Клиент: `{control_chat_id}`].", parse_mode='md')
+                log.warning(f"CMD FAILED: Client {control_chat_id} failed to delete source {source_chat_id} (not found).")
         except ValueError:
             await evt.reply("⚠️ Неверный формат ID/ссылки.")
         except Exception:
@@ -1095,10 +1206,13 @@ async def on_command(evt: events.NewMessage.Event):
                 # await!)
                 if await delete_source(source_chat_id, control_chat_id): 
                     await evt.reply(f"✓ Источник `{source_chat_id}` удален [Клиент: `{control_chat_id}`].", parse_mode='md')
+                    log.info(f"CMD SUCCESS: Client {control_chat_id} deleted source {source_chat_id} (by raw ID)")
                 else:
                     await evt.reply(f"⚠️ Источник `{source_chat_id}` не найден в списке [Клиент: `{control_chat_id}`].", parse_mode='md')
+                    log.warning(f"CMD FAILED: Client {control_chat_id} failed to delete source {source_chat_id} (not found by raw ID).")
             except ValueError:
                 await evt.reply("⚠️ Не удалось определить ID источника. Используйте ID, @username или ссылку.")
+                log.error(f"CMD ERROR: Client {control_chat_id} failed to determine source ID for {chat_input}")
 
     # /список чатов (await!)
     elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "чатов":
@@ -1106,6 +1220,7 @@ async def on_command(evt: events.NewMessage.Event):
         sources = await list_sources(control_chat_id) 
         await evt.reply(f"📢 Источники [Клиент: `{control_chat_id}`] ({len(sources)}):\n" + 
                       "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
+        log.info(f"CMD SUCCESS: Client {control_chat_id} viewed source list")
     
     # /ai (await!)
     elif cmd == "/ai":
@@ -1132,8 +1247,10 @@ async def on_command(evt: events.NewMessage.Event):
                 await set_ai_rule(source_chat_id, control_chat_id, rule) 
                 
                 await evt.reply(f"✓ AI правило установлено для источника `{source_chat_id}` [Клиент: `{control_chat_id}`]")
+                log.info(f"CMD SUCCESS: Client {control_chat_id} set AI rule for source {source_chat_id}")
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
+                log.warning(f"CMD ERROR: Client {control_chat_id} failed to set AI rule (bad ID)")
                 
         elif subcmd == "show" and len(parts) == 3:
             try:
@@ -1142,6 +1259,7 @@ async def on_command(evt: events.NewMessage.Event):
                 rule = await get_ai_rule(source_chat_id, control_chat_id) 
                 if rule:
                     await evt.reply(f"AI правило для `{source_chat_id}` [Клиент: `{control_chat_id}`]:\n{rule}")
+                    log.info(f"CMD SUCCESS: Client {control_chat_id} viewed AI rule for source {source_chat_id}")
                 else:
                     await evt.reply(f"Нет правила для чата `{source_chat_id}` [Клиент: `{control_chat_id}`]")
             except ValueError:
@@ -1153,6 +1271,7 @@ async def on_command(evt: events.NewMessage.Event):
                 # await!)
                 await clear_ai_rule(source_chat_id, control_chat_id) 
                 await evt.reply(f"✓ AI правило удалено для чата `{source_chat_id}` [Клиент: `{control_chat_id}`]")
+                log.info(f"CMD SUCCESS: Client {control_chat_id} cleared AI rule for source {source_chat_id}")
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
                 
@@ -1178,8 +1297,10 @@ async def on_command(evt: events.NewMessage.Event):
                 # await!)
                 if await add_admin(user_id, username):
                     await evt.reply(f"✅ Пользователь **{username}** (ID: `{user_id}`) добавлен в список администраторов.", parse_mode='md')
+                    log.info(f"CMD SUCCESS: Admin {user_id} added.")
                 else:
                     await evt.reply(f"⚠️ Пользователь **{username}** (ID: `{user_id}`) уже был администратором.", parse_mode='md')
+                    log.warning(f"CMD CONFLICT: Admin {user_id} already exists.")
 
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID пользователя. ID должен быть числом.")
@@ -1197,8 +1318,10 @@ async def on_command(evt: events.NewMessage.Event):
                 # await!)
                 if await remove_admin(user_id):
                     await evt.reply(f"✅ Пользователь с ID `{user_id}` удален из администраторов.")
+                    log.info(f"CMD SUCCESS: Admin {user_id} removed.")
                 else:
                     await evt.reply(f"⚠️ Пользователь с ID `{user_id}` не был в списке администраторов.")
+                    log.warning(f"CMD FAILED: Admin {user_id} not found for removal.")
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID пользователя.")
                 
@@ -1213,6 +1336,7 @@ async def on_command(evt: events.NewMessage.Event):
                     response += f"• **{username}** (ID: `{uid}`)\n"
 
             await evt.reply(response, parse_mode='md')
+            log.info(f"CMD SUCCESS: Admin list viewed.")
 
     # /бан (await!)
     elif cmd == "/бан":
@@ -1228,10 +1352,13 @@ async def on_command(evt: events.NewMessage.Event):
                     user_entity = await client.get_entity(user_id)
                     ban_name = get_display_name(user_entity)
                     await evt.reply(f"✅ Пользователь **{ban_name}** (ID: `{user_id}`) добавлен в список заблокированных.", parse_mode='md')
+                    log.info(f"CMD SUCCESS: User {user_id} banned.")
                 except Exception:
                     await evt.reply(f"✅ Пользователь с ID `{user_id}` добавлен в список заблокированных.", parse_mode='md')
+                    log.info(f"CMD SUCCESS: User {user_id} banned (No Entity).")
             else:
                 await evt.reply(f"⚠️ Пользователь с ID `{user_id}` уже заблокирован.")
+                log.warning(f"CMD CONFLICT: User {user_id} already banned.")
         except ValueError:
             await evt.reply("⚠️ Неверный формат ID пользователя. ID должен быть числом.")
 
@@ -1246,8 +1373,10 @@ async def on_command(evt: events.NewMessage.Event):
             # await!)
             if await unban_user(user_id):
                 await evt.reply(f"✅ Пользователь с ID `{user_id}` удален из списка заблокированных.")
+                log.info(f"CMD SUCCESS: User {user_id} unbanned.")
             else:
                 await evt.reply(f"⚠️ Пользователь с ID `{user_id}` не был в списке заблокированных.")
+                log.warning(f"CMD FAILED: User {user_id} not found for unban.")
         except ValueError:
             await evt.reply("⚠️ Неверный формат ID пользователя.")
         
@@ -1268,9 +1397,10 @@ async def on_command(evt: events.NewMessage.Event):
                     response += f"• *Неизвестный пользователь* (ID: `{uid}`)\n"
 
         await evt.reply(response, parse_mode='md')
+        log.info(f"CMD SUCCESS: Banned user list viewed.")
     
     # /help
-    elif cmd == "/help":
+    elif cmd == "help":
         response = (
             "**🤖 Управление Мониторингом (Клиентский режим)**\n\n"
             "**1. Ключевые слова (привязаны к этому чату):**\n"
@@ -1299,6 +1429,7 @@ async def on_command(evt: events.NewMessage.Event):
             "• `/register <control_id> <target_id> <Имя>` (Регистрация нового клиента)"
         )
         await evt.reply(response, parse_mode='md')
+        log.info(f"CMD SUCCESS: Help viewed by {evt.sender_id}")
 
 
 # ====== Запуск ======
