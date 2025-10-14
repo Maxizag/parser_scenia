@@ -722,7 +722,13 @@ async def on_message(evt: events.NewMessage.Event):
             continue
 
         # 3.2. Проверка ИИ (персонализированная)
-        ai_passed, ai_verdict = await ai_filter(text, source_chat_id, control_chat_id)
+        # ----------------------------------------------------------------------------------
+        # 🚨 АКТИВНА ЗАГЛУШКА: AI-ПРОВЕРКА ВЫКЛЮЧЕНА! 🚨
+        # Сообщения с KW Match всегда будут пропускаться.
+        # ----------------------------------------------------------------------------------
+        ai_passed = True 
+        ai_verdict = "AI Filter DISABLED (Passed by Default)"
+        # ai_passed, ai_verdict = await ai_filter(text, source_chat_id, control_chat_id) # Закомментировано
         
         # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ РЕЗУЛЬТАТА AI !!!
         log.info(
@@ -730,6 +736,7 @@ async def on_message(evt: events.NewMessage.Event):
             f"Verdict: {ai_verdict} | Msg: {text[:50]}..."
         )
         # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
+        # ----------------------------------------------------------------------------------
 
 
         # 3.3. Логика пересылки
@@ -1400,7 +1407,7 @@ async def on_command(evt: events.NewMessage.Event):
         log.info(f"CMD SUCCESS: Banned user list viewed.")
     
     # /help
-    elif cmd == "help":
+    elif cmd == "/help":
         response = (
             "**🤖 Управление Мониторингом (Клиентский режим)**\n\n"
             "**1. Ключевые слова (привязаны к этому чату):**\n"
