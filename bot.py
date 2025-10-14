@@ -51,9 +51,10 @@ DB_FILE = "bot_data.db"
 
 
 def init_db():
-    """Синхронная функция для инициализации таблиц при старте."""
+    """Синхронная функция для инициализации таблиц при старте. Добавлен timeout."""
     log.info("Initializing database tables...")
-    conn = sqlite3.connect(DB_FILE)
+    # !!! КРИТИЧНОЕ ИЗМЕНЕНИЕ: Добавлен timeout !!!
+    conn = sqlite3.connect(DB_FILE, timeout=10) 
     cursor = conn.cursor()
     
     # КОД СОЗДАНИЯ ВСЕХ ВАШИХ ТАБЛИЦ ПЕРЕНЕСЕН СЮДА:
@@ -134,7 +135,6 @@ client = TelegramClient("parser_session", API_ID, API_HASH)
 
 # ==============================================================================
 # АСИНХРОННЫЕ ОБЕРТКИ ДЛЯ СИНХРОННЫХ ОПЕРАЦИЙ SQLITE
-# КАЖДАЯ ФУНКЦИЯ ТЕПЕРЬ ОТКРЫВАЕТ/ЗАКРЫВАЕТ СВОЕ СОЕДИНЕНИЕ
 # ==============================================================================
 
 def run_in_executor(func):
@@ -145,8 +145,8 @@ def run_in_executor(func):
 # ----------------- ФУНКЦИИ ДЛЯ КЛИЕНТОВ -----------------
 @run_in_executor
 def add_client(control_id, target_id, name=""):
-    """Регистрирует нового клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Регистрирует нового клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO clients (control_chat_id, target_chat_id, name) VALUES (?, ?, ?)", 
@@ -160,8 +160,8 @@ def add_client(control_id, target_id, name=""):
 
 @run_in_executor
 def get_client_by_control(control_id):
-    """Находит данные клиента по его чату команд."""
-    conn = sqlite3.connect(DB_FILE)
+    """Находит данные клиента по его чату команд. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT control_chat_id, target_chat_id, name FROM clients WHERE control_chat_id = ?", 
@@ -175,8 +175,8 @@ def get_client_by_control(control_id):
 
 @run_in_executor
 def get_clients_monitoring_source(source_id):
-    """Находит всех клиентов, которые мониторят данный источник."""
-    conn = sqlite3.connect(DB_FILE)
+    """Находит всех клиентов, которые мониторят данный источник. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("""
@@ -196,8 +196,8 @@ def get_clients_monitoring_source(source_id):
 # ----------------- ФУНКЦИИ КЛЮЧЕВЫХ СЛОВ -----------------
 @run_in_executor
 def get_keywords(control_chat_id, source_chat_id=None):
-    """Получает ключевые слова для конкретного клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Получает ключевые слова для конкретного клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         query = "SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = 0"
@@ -214,8 +214,8 @@ def get_keywords(control_chat_id, source_chat_id=None):
 
 @run_in_executor
 def add_keyword(kw, control_chat_id, source_chat_id=0):
-    """Добавляет слово для конкретного клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Добавляет слово для конкретного клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO keywords (control_chat_id, source_chat_id, keyword) VALUES (?, ?, ?)", 
@@ -229,8 +229,8 @@ def add_keyword(kw, control_chat_id, source_chat_id=0):
 
 @run_in_executor
 def delete_keyword(kw, control_chat_id, source_chat_id=0):
-    """Удаляет слово для конкретного клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Удаляет слово для конкретного клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM keywords WHERE keyword = ? AND control_chat_id = ? AND source_chat_id = ?", 
@@ -243,8 +243,8 @@ def delete_keyword(kw, control_chat_id, source_chat_id=0):
 # ----------------- ФУНКЦИИ НЕГАТИВНЫХ СЛОВ -----------------
 @run_in_executor
 def get_negwords(control_chat_id):
-    """Получает негативные слова для конкретного клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Получает негативные слова для конкретного клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT negword FROM negwords WHERE control_chat_id = ?", (control_chat_id,))
@@ -254,8 +254,8 @@ def get_negwords(control_chat_id):
 
 @run_in_executor
 def add_negword(nw, control_chat_id):
-    """Добавляет негативное слово для конкретного клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Добавляет негативное слово для конкретного клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO negwords (control_chat_id, negword) VALUES (?, ?)", (control_chat_id, nw.lower()))
@@ -268,8 +268,8 @@ def add_negword(nw, control_chat_id):
 
 @run_in_executor
 def delete_negword(nw, control_chat_id):
-    """Удаляет негативное слово для конкретного клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Удаляет негативное слово для конкретного клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM negwords WHERE negword = ? AND control_chat_id = ?", (nw.lower(), control_chat_id))
@@ -281,8 +281,8 @@ def delete_negword(nw, control_chat_id):
 # ----------------- ФУНКЦИИ ИСТОЧНИКОВ -----------------
 @run_in_executor
 def list_sources(control_chat_id):
-    """Получает список источников, которые мониторит конкретный клиент."""
-    conn = sqlite3.connect(DB_FILE)
+    """Получает список источников, которые мониторит конкретный клиент. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT source_chat_id, chat_title FROM sources WHERE control_chat_id = ?", (control_chat_id,))
@@ -292,8 +292,8 @@ def list_sources(control_chat_id):
 
 @run_in_executor
 def add_source(source_chat_id, control_chat_id, chat_title):
-    """Добавляет источник для конкретного клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Добавляет источник для конкретного клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR REPLACE INTO sources (source_chat_id, control_chat_id, chat_title) VALUES (?, ?, ?)", 
@@ -308,8 +308,8 @@ def add_source(source_chat_id, control_chat_id, chat_title):
 
 @run_in_executor
 def delete_source(source_chat_id, control_chat_id):
-    """Удаляет источник для конкретного клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Удаляет источник для конкретного клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM sources WHERE source_chat_id = ? AND control_chat_id = ?", (source_chat_id, control_chat_id))
@@ -321,8 +321,8 @@ def delete_source(source_chat_id, control_chat_id):
 # ----------------- ФУНКЦИИ AI ПРАВИЛ -----------------
 @run_in_executor
 def get_ai_rule(source_chat_id, control_chat_id):
-    """Получает AI правило для конкретного источника и клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Получает AI правило для конкретного источника и клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT rule FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
@@ -334,8 +334,8 @@ def get_ai_rule(source_chat_id, control_chat_id):
 
 @run_in_executor
 def set_ai_rule(source_chat_id, control_chat_id, rule):
-    """Устанавливает AI правило для конкретного источника и клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Устанавливает AI правило для конкретного источника и клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR REPLACE INTO ai_rules (source_chat_id, control_chat_id, rule) VALUES (?, ?, ?)", 
@@ -346,8 +346,8 @@ def set_ai_rule(source_chat_id, control_chat_id, rule):
 
 @run_in_executor
 def clear_ai_rule(source_chat_id, control_chat_id):
-    """Удаляет AI правило для конкретного источника и клиента."""
-    conn = sqlite3.connect(DB_FILE)
+    """Удаляет AI правило для конкретного источника и клиента. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
@@ -359,7 +359,8 @@ def clear_ai_rule(source_chat_id, control_chat_id):
 # ----------------- ГЛОБАЛЬНЫЕ ФУНКЦИИ БЕЗ ПРИВЯЗКИ К КЛИЕНТУ -----------------
 @run_in_executor
 def is_seen(msg_key):
-    conn = sqlite3.connect(DB_FILE)
+    """Проверяет, было ли сообщение увидено. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT 1 FROM seen_messages WHERE msg_key = ?", (msg_key,))
@@ -369,7 +370,8 @@ def is_seen(msg_key):
 
 @run_in_executor
 def mark_seen(msg_key):
-    conn = sqlite3.connect(DB_FILE)
+    """Помечает сообщение как увиденное. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR IGNORE INTO seen_messages (msg_key) VALUES (?)", (msg_key,))
@@ -379,11 +381,11 @@ def mark_seen(msg_key):
 
 @run_in_executor
 def is_admin(user_id):
-    """Проверяет, является ли пользователь администратором."""
+    """Проверяет, является ли пользователь администратором. Добавлен timeout."""
     if user_id == ADMIN_USER_ID:
         return True 
         
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
@@ -393,8 +395,8 @@ def is_admin(user_id):
 
 @run_in_executor
 def add_admin(user_id, username):
-    """Добавляет пользователя в список администраторов."""
-    conn = sqlite3.connect(DB_FILE)
+    """Добавляет пользователя в список администраторов. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR IGNORE INTO admins (user_id, username) VALUES (?, ?)", 
@@ -408,8 +410,8 @@ def add_admin(user_id, username):
 
 @run_in_executor
 def remove_admin(user_id):
-    """Удаляет пользователя из списка администраторов."""
-    conn = sqlite3.connect(DB_FILE)
+    """Удаляет пользователя из списка администраторов. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
@@ -420,8 +422,8 @@ def remove_admin(user_id):
 
 @run_in_executor
 def list_admins():
-    """Возвращает список всех администраторов."""
-    conn = sqlite3.connect(DB_FILE)
+    """Возвращает список всех администраторов. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT user_id, username FROM admins")
@@ -431,7 +433,8 @@ def list_admins():
 
 @run_in_executor
 def is_banned(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    """Проверяет, забанен ли пользователь. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
@@ -441,7 +444,8 @@ def is_banned(user_id):
 
 @run_in_executor
 def ban_user(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    """Банит пользователя. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)", (user_id,))
@@ -454,7 +458,8 @@ def ban_user(user_id):
 
 @run_in_executor
 def unban_user(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    """Разбанивает пользователя. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
@@ -465,7 +470,8 @@ def unban_user(user_id):
 
 @run_in_executor
 def list_banned_users():
-    conn = sqlite3.connect(DB_FILE)
+    """Возвращает список забаненных. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT user_id FROM banned_users")
@@ -475,7 +481,8 @@ def list_banned_users():
 
 @run_in_executor
 def store_forward_reason(target_msg_id, reason):
-    conn = sqlite3.connect(DB_FILE)
+    """Сохраняет причину пересылки. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR REPLACE INTO forward_reasons (target_msg_id, reason) VALUES (?, ?)", 
@@ -486,7 +493,8 @@ def store_forward_reason(target_msg_id, reason):
 
 @run_in_executor
 def get_forward_reason(target_msg_id):
-    conn = sqlite3.connect(DB_FILE)
+    """Получает причину пересылки. Добавлен timeout."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT reason FROM forward_reasons WHERE target_msg_id = ?", (target_msg_id,))
