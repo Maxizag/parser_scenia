@@ -25,7 +25,7 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # ==============================================================================
-# НАСТРОЙКА ЛОГИРОВАНИЯ (В КОНСОЛЬ И В ФАЙЛ)
+# НАСТРОЙКА ЛОГИРОВАНИЯ
 # ==============================================================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -46,79 +46,87 @@ if OPENAI_API_KEY:
 else:
     log.warning("⚠️ OPENAI_API_KEY not found. AI filtering will be skipped.")
 
-# ====== База данных (СОЗДАНИЕ ТАБЛИЦ) ======
+# ====== База данных: ОСТАВЛЯЕМ ТОЛЬКО ПУТЬ К ФАЙЛУ ======
 DB_FILE = "bot_data.db"
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-cursor = conn.cursor()
 
-# Создание всех таблиц остается синхронным, так как это выполняется до запуска asyncio
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS clients (
-        client_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        control_chat_id INTEGER UNIQUE NOT NULL,  
-        target_chat_id INTEGER UNIQUE NOT NULL,  
-        name TEXT,
-        is_active INTEGER DEFAULT 1
-    )
-""")
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS keywords (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        control_chat_id INTEGER NOT NULL,  
-        source_chat_id INTEGER NOT NULL,   
-        keyword TEXT NOT NULL,
-        UNIQUE(control_chat_id, source_chat_id, keyword) 
-    )
-""")
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS negwords (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        control_chat_id INTEGER NOT NULL, 
-        negword TEXT NOT NULL,
-        UNIQUE(control_chat_id, negword)
-    )
-""")
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS sources (
-        source_chat_id INTEGER NOT NULL,      
-        control_chat_id INTEGER NOT NULL,     
-        chat_title TEXT,
-        PRIMARY KEY (source_chat_id, control_chat_id)
-    )
-""")
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS seen_messages (
-        msg_key TEXT PRIMARY KEY,
-        timestamp INTEGER DEFAULT (strftime('%s', 'now'))
-    )
-""")
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS ai_rules (
-        source_chat_id INTEGER NOT NULL,      
-        control_chat_id INTEGER NOT NULL,     
-        rule TEXT NOT NULL,
-        PRIMARY KEY (source_chat_id, control_chat_id)
-    )
-""")
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS banned_users (
-        user_id INTEGER PRIMARY KEY
-    )
-""")
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS admins (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT
-    )
-""")
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS forward_reasons (
-        target_msg_id INTEGER PRIMARY KEY,
-        reason TEXT
-    )
-""")
 
-conn.commit()
+def init_db():
+    """Синхронная функция для инициализации таблиц при старте."""
+    log.info("Initializing database tables...")
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # КОД СОЗДАНИЯ ВСЕХ ВАШИХ ТАБЛИЦ ПЕРЕНЕСЕН СЮДА:
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS clients (
+            client_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            control_chat_id INTEGER UNIQUE NOT NULL,  
+            target_chat_id INTEGER UNIQUE NOT NULL,  
+            name TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS keywords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            control_chat_id INTEGER NOT NULL,  
+            source_chat_id INTEGER NOT NULL,   
+            keyword TEXT NOT NULL,
+            UNIQUE(control_chat_id, source_chat_id, keyword) 
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS negwords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            control_chat_id INTEGER NOT NULL, 
+            negword TEXT NOT NULL,
+            UNIQUE(control_chat_id, negword)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sources (
+            source_chat_id INTEGER NOT NULL,      
+            control_chat_id INTEGER NOT NULL,     
+            chat_title TEXT,
+            PRIMARY KEY (source_chat_id, control_chat_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS seen_messages (
+            msg_key TEXT PRIMARY KEY,
+            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ai_rules (
+            source_chat_id INTEGER NOT NULL,      
+            control_chat_id INTEGER NOT NULL,     
+            rule TEXT NOT NULL,
+            PRIMARY KEY (source_chat_id, control_chat_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS banned_users (
+            user_id INTEGER PRIMARY KEY
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS forward_reasons (
+            target_msg_id INTEGER PRIMARY KEY,
+            reason TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+    log.info("Database tables initialized.")
+
 
 # ====== Клиент ======
 client = TelegramClient("parser_session", API_ID, API_HASH)
@@ -126,21 +134,20 @@ client = TelegramClient("parser_session", API_ID, API_HASH)
 
 # ==============================================================================
 # АСИНХРОННЫЕ ОБЕРТКИ ДЛЯ СИНХРОННЫХ ОПЕРАЦИЙ SQLITE
+# КАЖДАЯ ФУНКЦИЯ ТЕПЕРЬ ОТКРЫВАЕТ/ЗАКРЫВАЕТ СВОЕ СОЕДИНЕНИЕ
 # ==============================================================================
 
-# Декоратор для запуска синхронных функций в отдельном потоке
 def run_in_executor(func):
     async def wrapper(*args, **kwargs):
-        # Используем asyncio.to_thread для запуска синхронной функции
         return await asyncio.to_thread(func, *args, **kwargs)
     return wrapper
-
-# ====== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ТЕПЕРЬ АСИНХРОННЫЕ) ======
 
 # ----------------- ФУНКЦИИ ДЛЯ КЛИЕНТОВ -----------------
 @run_in_executor
 def add_client(control_id, target_id, name=""):
     """Регистрирует нового клиента."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO clients (control_chat_id, target_chat_id, name) VALUES (?, ?, ?)", 
                       (control_id, target_id, name))
@@ -148,48 +155,68 @@ def add_client(control_id, target_id, name=""):
         return True
     except sqlite3.IntegrityError:
         return False
+    finally:
+        conn.close()
 
 @run_in_executor
 def get_client_by_control(control_id):
     """Находит данные клиента по его чату команд."""
-    cursor.execute("SELECT control_chat_id, target_chat_id, name FROM clients WHERE control_chat_id = ?", 
-                  (control_id,))
-    row = cursor.fetchone()
-    if row:
-        return {'control_id': row[0], 'target_id': row[1], 'name': row[2]}
-    return None
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT control_chat_id, target_chat_id, name FROM clients WHERE control_chat_id = ?", 
+                      (control_id,))
+        row = cursor.fetchone()
+        if row:
+            return {'control_id': row[0], 'target_id': row[1], 'name': row[2]}
+        return None
+    finally:
+        conn.close()
 
 @run_in_executor
 def get_clients_monitoring_source(source_id):
     """Находит всех клиентов, которые мониторят данный источник."""
-    cursor.execute("""
-        SELECT 
-            c.control_chat_id, 
-            c.target_chat_id 
-        FROM clients c
-        JOIN sources s ON c.control_chat_id = s.control_chat_id
-        WHERE s.source_chat_id = ? AND c.is_active = 1
-    """, (source_id,))
-    
-    return [{'control_id': row[0], 'target_id': row[1]} for row in cursor.fetchall()]
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT 
+                c.control_chat_id, 
+                c.target_chat_id 
+            FROM clients c
+            JOIN sources s ON c.control_chat_id = s.control_chat_id
+            WHERE s.source_chat_id = ? AND c.is_active = 1
+        """, (source_id,))
+        
+        return [{'control_id': row[0], 'target_id': row[1]} for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
 
 # ----------------- ФУНКЦИИ КЛЮЧЕВЫХ СЛОВ -----------------
 @run_in_executor
 def get_keywords(control_chat_id, source_chat_id=None):
     """Получает ключевые слова для конкретного клиента."""
-    query = "SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = 0"
-    params = [control_chat_id]
-    
-    if source_chat_id is not None and source_chat_id != 0:
-        query += " UNION SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = ?"
-        params.extend([control_chat_id, source_chat_id])
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        query = "SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = 0"
+        params = [control_chat_id]
         
-    cursor.execute(query, params)
-    return [row[0].lower() for row in cursor.fetchall()]
+        if source_chat_id is not None and source_chat_id != 0:
+            query += " UNION SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = ?"
+            params.extend([control_chat_id, source_chat_id])
+            
+        cursor.execute(query, params)
+        return [row[0].lower() for row in cursor.fetchall()]
+    finally:
+        conn.close()
 
 @run_in_executor
 def add_keyword(kw, control_chat_id, source_chat_id=0):
     """Добавляет слово для конкретного клиента."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO keywords (control_chat_id, source_chat_id, keyword) VALUES (?, ?, ?)", 
                       (control_chat_id, source_chat_id, kw.lower()))
@@ -197,49 +224,77 @@ def add_keyword(kw, control_chat_id, source_chat_id=0):
         return True
     except sqlite3.IntegrityError:
         return False
+    finally:
+        conn.close()
 
 @run_in_executor
 def delete_keyword(kw, control_chat_id, source_chat_id=0):
     """Удаляет слово для конкретного клиента."""
-    cursor.execute("DELETE FROM keywords WHERE keyword = ? AND control_chat_id = ? AND source_chat_id = ?", 
-                  (kw.lower(), control_chat_id, source_chat_id))
-    conn.commit()
-    return cursor.rowcount > 0 
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM keywords WHERE keyword = ? AND control_chat_id = ? AND source_chat_id = ?", 
+                      (kw.lower(), control_chat_id, source_chat_id))
+        conn.commit()
+        return cursor.rowcount > 0 
+    finally:
+        conn.close()
 
 # ----------------- ФУНКЦИИ НЕГАТИВНЫХ СЛОВ -----------------
 @run_in_executor
 def get_negwords(control_chat_id):
     """Получает негативные слова для конкретного клиента."""
-    cursor.execute("SELECT negword FROM negwords WHERE control_chat_id = ?", (control_chat_id,))
-    return [row[0].lower() for row in cursor.fetchall()]
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT negword FROM negwords WHERE control_chat_id = ?", (control_chat_id,))
+        return [row[0].lower() for row in cursor.fetchall()]
+    finally:
+        conn.close()
 
 @run_in_executor
 def add_negword(nw, control_chat_id):
     """Добавляет негативное слово для конкретного клиента."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO negwords (control_chat_id, negword) VALUES (?, ?)", (control_chat_id, nw.lower()))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
         return False
+    finally:
+        conn.close()
 
 @run_in_executor
 def delete_negword(nw, control_chat_id):
     """Удаляет негативное слово для конкретного клиента."""
-    cursor.execute("DELETE FROM negwords WHERE negword = ? AND control_chat_id = ?", (nw.lower(), control_chat_id))
-    conn.commit()
-    return cursor.rowcount > 0 
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM negwords WHERE negword = ? AND control_chat_id = ?", (nw.lower(), control_chat_id))
+        conn.commit()
+        return cursor.rowcount > 0 
+    finally:
+        conn.close()
 
 # ----------------- ФУНКЦИИ ИСТОЧНИКОВ -----------------
 @run_in_executor
 def list_sources(control_chat_id):
     """Получает список источников, которые мониторит конкретный клиент."""
-    cursor.execute("SELECT source_chat_id, chat_title FROM sources WHERE control_chat_id = ?", (control_chat_id,))
-    return cursor.fetchall()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT source_chat_id, chat_title FROM sources WHERE control_chat_id = ?", (control_chat_id,))
+        return cursor.fetchall()
+    finally:
+        conn.close()
 
 @run_in_executor
 def add_source(source_chat_id, control_chat_id, chat_title):
     """Добавляет источник для конкретного клиента."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR REPLACE INTO sources (source_chat_id, control_chat_id, chat_title) VALUES (?, ?, ?)", 
                       (source_chat_id, control_chat_id, chat_title))
@@ -248,59 +303,99 @@ def add_source(source_chat_id, control_chat_id, chat_title):
     except Exception as e:
         log.error(f"Error adding source: {e}")
         return False
+    finally:
+        conn.close()
 
 @run_in_executor
 def delete_source(source_chat_id, control_chat_id):
     """Удаляет источник для конкретного клиента."""
-    cursor.execute("DELETE FROM sources WHERE source_chat_id = ? AND control_chat_id = ?", (source_chat_id, control_chat_id))
-    conn.commit()
-    return cursor.rowcount > 0
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM sources WHERE source_chat_id = ? AND control_chat_id = ?", (source_chat_id, control_chat_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 # ----------------- ФУНКЦИИ AI ПРАВИЛ -----------------
 @run_in_executor
 def get_ai_rule(source_chat_id, control_chat_id):
     """Получает AI правило для конкретного источника и клиента."""
-    cursor.execute("SELECT rule FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
-                  (source_chat_id, control_chat_id))
-    row = cursor.fetchone()
-    return row[0] if row else None
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT rule FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
+                      (source_chat_id, control_chat_id))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
 
 @run_in_executor
 def set_ai_rule(source_chat_id, control_chat_id, rule):
     """Устанавливает AI правило для конкретного источника и клиента."""
-    cursor.execute("INSERT OR REPLACE INTO ai_rules (source_chat_id, control_chat_id, rule) VALUES (?, ?, ?)", 
-                  (source_chat_id, control_chat_id, rule))
-    conn.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT OR REPLACE INTO ai_rules (source_chat_id, control_chat_id, rule) VALUES (?, ?, ?)", 
+                      (source_chat_id, control_chat_id, rule))
+        conn.commit()
+    finally:
+        conn.close()
 
 @run_in_executor
 def clear_ai_rule(source_chat_id, control_chat_id):
     """Удаляет AI правило для конкретного источника и клиента."""
-    cursor.execute("DELETE FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
-                  (source_chat_id, control_chat_id))
-    conn.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
+                      (source_chat_id, control_chat_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 # ----------------- ГЛОБАЛЬНЫЕ ФУНКЦИИ БЕЗ ПРИВЯЗКИ К КЛИЕНТУ -----------------
 @run_in_executor
 def is_seen(msg_key):
-    cursor.execute("SELECT 1 FROM seen_messages WHERE msg_key = ?", (msg_key,))
-    return cursor.fetchone() is not None
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1 FROM seen_messages WHERE msg_key = ?", (msg_key,))
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
 
 @run_in_executor
 def mark_seen(msg_key):
-    cursor.execute("INSERT OR IGNORE INTO seen_messages (msg_key) VALUES (?)", (msg_key,))
-    conn.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT OR IGNORE INTO seen_messages (msg_key) VALUES (?)", (msg_key,))
+        conn.commit()
+    finally:
+        conn.close()
 
 @run_in_executor
 def is_admin(user_id):
     """Проверяет, является ли пользователь администратором."""
     if user_id == ADMIN_USER_ID:
         return True 
-    cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
-    return cursor.fetchone() is not None
+        
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
 
 @run_in_executor
 def add_admin(user_id, username):
     """Добавляет пользователя в список администраторов."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR IGNORE INTO admins (user_id, username) VALUES (?, ?)", 
                       (user_id, username))
@@ -308,56 +403,97 @@ def add_admin(user_id, username):
         return cursor.rowcount > 0
     except Exception:
         return False
+    finally:
+        conn.close()
 
 @run_in_executor
 def remove_admin(user_id):
     """Удаляет пользователя из списка администраторов."""
-    cursor.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
-    conn.commit()
-    return cursor.rowcount > 0
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 @run_in_executor
 def list_admins():
     """Возвращает список всех администраторов."""
-    cursor.execute("SELECT user_id, username FROM admins")
-    return cursor.fetchall()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT user_id, username FROM admins")
+        return cursor.fetchall()
+    finally:
+        conn.close()
 
 @run_in_executor
 def is_banned(user_id):
-    cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
-    return cursor.fetchone() is not None
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
 
 @run_in_executor
 def ban_user(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
     try:
         cursor.execute("INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)", (user_id,))
         conn.commit()
         return True
     except Exception:
         return False
+    finally:
+        conn.close()
 
 @run_in_executor
 def unban_user(user_id):
-    cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
-    conn.commit()
-    return cursor.rowcount > 0
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 @run_in_executor
 def list_banned_users():
-    cursor.execute("SELECT user_id FROM banned_users")
-    return [row[0] for row in cursor.fetchall()]
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT user_id FROM banned_users")
+        return [row[0] for row in cursor.fetchall()]
+    finally:
+        conn.close()
 
 @run_in_executor
 def store_forward_reason(target_msg_id, reason):
-    cursor.execute("INSERT OR REPLACE INTO forward_reasons (target_msg_id, reason) VALUES (?, ?)", 
-                  (target_msg_id, reason))
-    conn.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT OR REPLACE INTO forward_reasons (target_msg_id, reason) VALUES (?, ?)", 
+                      (target_msg_id, reason))
+        conn.commit()
+    finally:
+        conn.close()
 
 @run_in_executor
 def get_forward_reason(target_msg_id):
-    cursor.execute("SELECT reason FROM forward_reasons WHERE target_msg_id = ?", (target_msg_id,))
-    row = cursor.fetchone()
-    return row[0] if row else None
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT reason FROM forward_reasons WHERE target_msg_id = ?", (target_msg_id,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
 
 
 # ----------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) -----------------
@@ -404,7 +540,6 @@ async def ai_filter(text, source_chat_id, control_chat_id):
     if not OPENAI_API_KEY:
         return True, "SKIPPED (OPENAI_API_KEY not set)"
 
-    # Используем await, т.к. get_ai_rule теперь асинхронная
     rule = await get_ai_rule(source_chat_id, control_chat_id) 
     if not rule:
         return True, "SKIPPED (No AI rule set for this chat by client)"
@@ -1148,6 +1283,10 @@ async def on_command(evt: events.NewMessage.Event):
 
 # ====== Запуск ======
 async def main():
+    
+    # 0. Инициализация БД (таблиц)
+    init_db()
+    
     if API_ID == 0 or not API_HASH:
         log.error("CRITICAL: API_ID or API_HASH is empty. Check your .env file!")
         return
@@ -1167,15 +1306,9 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
-    # Обернем закрытие БД в синхронную функцию, которую можно вызвать
-    def close_db():
-        log.info("Database connection closed.")
-        conn.close()
-
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Shutting down...")
-    finally:
-        # Вызываем синхронное закрытие БД
-        close_db()
+    except Exception as e:
+        log.error(f"FATAL ERROR during bot execution: {e}")
