@@ -883,9 +883,15 @@ async def on_command(evt: events.NewMessage.Event):
             # await!)
             if await add_keyword(keyword, control_chat_id, source_chat_id): 
                 chat_name = await get_chat_title(source_chat_id)
+                # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ УСПЕХА !!!
+                log.info(f"CMD SUCCESS: Client {control_chat_id} added keyword '{keyword}' for source {source_chat_id}")
+                # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
                 await evt.reply(f"✓ Добавлено слово **'{keyword}'** для: **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
             else:
                 chat_name = await get_chat_title(source_chat_id)
+                # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ КОНФЛИКТА/ПОВТОРА !!!
+                log.warning(f"CMD CONFLICT: Client {control_chat_id} failed to add keyword '{keyword}' (already exists) for source {source_chat_id}")
+                # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
                 await evt.reply(f"⚠️ Уже существует: **{keyword}** для {chat_name} [Клиент: `{control_chat_id}`]", parse_mode='md')
 
     # /удалить +слово (await!)
@@ -918,9 +924,15 @@ async def on_command(evt: events.NewMessage.Event):
         # await!)
         if await delete_keyword(keyword, control_chat_id, source_chat_id): 
             chat_name = await get_chat_title(source_chat_id)
+            # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ УСПЕХА !!!
+            log.info(f"CMD SUCCESS: Client {control_chat_id} deleted keyword '{keyword}' for source {source_chat_id}")
+            # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
             await evt.reply(f"✓ Удалено слово **'{keyword}'** для: **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
         else:
             chat_name = await get_chat_title(source_chat_id)
+            # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ НЕУДАЧИ !!!
+            log.warning(f"CMD FAILED: Client {control_chat_id} failed to delete keyword '{keyword}' (not found) for source {source_chat_id}")
+            # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
             await evt.reply(f"⚠️ Слово **'{keyword}'** не найдено для: {chat_name} [Клиент: `{control_chat_id}`]", parse_mode='md')
 
 
