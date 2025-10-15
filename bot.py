@@ -799,6 +799,790 @@ async def on_command(evt: events.NewMessage.Event):
     else:
         return 
 
+    import asyncio
+import logging
+import sqlite3
+import os
+import re 
+from dotenv import load_dotenv
+from telethon import TelegramClient, events
+import openai 
+from telethon.utils import get_peer_id
+from telethon.tl.types import User, Channel, Chat 
+import json
+
+# Загрузка переменных окружения из .env файла
+load_dotenv()
+
+# ====== Настройки: Сначала получаем все переменные окружения! ======
+API_ID = int(os.getenv("TG_API_ID", "0"))
+API_HASH = os.getenv("TG_API_HASH", "")
+PHONE = os.getenv("TG_PHONE", "")
+# Используйте CONTROL_CHAT_ID и TARGET_CHAT_ID только как запасные или для главного админа
+TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "0"))
+CONTROL_CHAT_ID = int(os.getenv("CONTROL_CHAT_ID", "0"))
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
+
+# OpenAI API
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+# ==============================================================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ
+# ==============================================================================
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger(__name__)
+
+# ==============================================================================
+# ИНИЦИАЛИЗАЦИЯ OpenAI
+# ==============================================================================
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
+    log.info("✓ OpenAI API Key set. AI filtering is active.")
+else:
+    log.warning("⚠️ OPENAI_API_KEY not found. AI filtering will be skipped.")
+
+# ====== База данных: ОСТАВЛЯЕМ ТОЛЬКО ПУТЬ К ФАЙЛУ ======
+DB_FILE = "bot_data.db"
+
+
+def init_db():
+    """Синхронная функция для инициализации таблиц при старте. Добавлен timeout."""
+    log.info("Initializing database tables...")
+    # !!! КРИТИЧНОЕ ИЗМЕНЕНИЕ: Добавлен timeout и контекстный менеджер !!!
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn: 
+            cursor = conn.cursor()
+            
+            # КОД СОЗДАНИЯ ВСЕХ ВАШИХ ТАБЛИЦ ПЕРЕНЕСЕН СЮДА:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS clients (
+                    client_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    control_chat_id INTEGER UNIQUE NOT NULL,  
+                    target_chat_id INTEGER UNIQUE NOT NULL,  
+                    name TEXT,
+                    is_active INTEGER DEFAULT 1
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    control_chat_id INTEGER NOT NULL,  
+                    source_chat_id INTEGER NOT NULL,   
+                    keyword TEXT NOT NULL,
+                    UNIQUE(control_chat_id, source_chat_id, keyword) 
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS negwords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    control_chat_id INTEGER NOT NULL, 
+                    negword TEXT NOT NULL,
+                    UNIQUE(control_chat_id, negword)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sources (
+                    source_chat_id INTEGER NOT NULL,      
+                    control_chat_id INTEGER NOT NULL,     
+                    chat_title TEXT,
+                    PRIMARY KEY (source_chat_id, control_chat_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seen_messages (
+                    msg_key TEXT PRIMARY KEY,
+                    timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_rules (
+                    source_chat_id INTEGER NOT NULL,      
+                    control_chat_id INTEGER NOT NULL,     
+                    rule TEXT NOT NULL,
+                    PRIMARY KEY (source_chat_id, control_chat_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS banned_users (
+                    user_id INTEGER PRIMARY KEY
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT
+                )
+            """)
+            # !!! ИЗМЕНЕННАЯ ТАБЛИЦА: Добавлен log_entry !!!
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS forward_reasons (
+                    target_msg_id INTEGER PRIMARY KEY,
+                    source_chat_id INTEGER NOT NULL,
+                    control_chat_id INTEGER NOT NULL,  
+                    log_entry TEXT,  -- Будет хранить полный лог AI-проверки и причину
+                    reason TEXT
+                )
+            """)
+
+            conn.commit()
+            log.info("Database tables initialized.")
+    except Exception as e:
+        log.error(f"FATAL DB ERROR during initialization: {e}")
+
+
+# ====== Клиент ======
+client = TelegramClient("parser_session", API_ID, API_HASH)
+
+
+# ==============================================================================
+# АСИНХРОННЫЕ ОБЕРТКИ ДЛЯ СИНХРОННЫХ ОПЕРАЦИЙ SQLITE
+# ==============================================================================
+
+def run_in_executor(func):
+    async def wrapper(*args, **kwargs):
+        # Используем asyncio.to_thread для запуска синхронных функций в отдельном потоке
+        return await asyncio.to_thread(func, *args, **kwargs)
+    return wrapper
+
+# ----------------- ФУНКЦИИ ДЛЯ КЛИЕНТОВ -----------------
+@run_in_executor
+def add_client(control_id, target_id, name=""):
+    """Регистрирует нового клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO clients (control_chat_id, target_chat_id, name) VALUES (?, ?, ?)", 
+                          (control_id, target_id, name))
+            conn.commit()
+            return True
+    except sqlite3.IntegrityError:
+        return False
+    except Exception as e:
+        log.error(f"DB ERROR (add_client): {e}")
+        return False
+
+@run_in_executor
+def get_client_by_control(control_id):
+    """Находит данные клиента по его чату команд. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT client_id, control_chat_id, target_chat_id, name FROM clients WHERE control_chat_id = ?", 
+                          (control_id,))
+            row = cursor.fetchone()
+            if row:
+                return {'id': row[0], 'control_id': row[1], 'target_id': row[2], 'name': row[3]}
+            return None
+    except Exception as e:
+        log.error(f"DB ERROR (get_client_by_control): {e}")
+        return None
+
+# **# ИСПРАВЛЕНИЕ: Новая функция для поиска клиента по target_chat_id**
+@run_in_executor
+def get_client_by_target(target_id):
+    """Находит данные клиента по его чату пересылки."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT client_id, control_chat_id, target_chat_id, name FROM clients WHERE target_chat_id = ?", 
+                          (target_id,))
+            row = cursor.fetchone()
+            if row:
+                return {'id': row[0], 'control_id': row[1], 'target_id': row[2], 'name': row[3]}
+            return None
+    except Exception as e:
+        log.error(f"DB ERROR (get_client_by_target): {e}")
+        return None
+
+# **# ИСПРАВЛЕНИЕ: Функция для проверки, является ли чат контрольным или целевым**
+@run_in_executor
+def get_client_role_by_chat_id(chat_id):
+    """
+    Проверяет, является ли чат чатом управления или чатом пересылки клиента.
+    Возвращает: 'control' или 'target' или None.
+    """
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT control_chat_id FROM clients WHERE control_chat_id = ?", (chat_id,))
+            if cursor.fetchone() is not None:
+                return 'control'
+            
+            cursor.execute("SELECT target_chat_id FROM clients WHERE target_chat_id = ?", (chat_id,))
+            if cursor.fetchone() is not None:
+                return 'target'
+            
+            return None
+    except Exception as e:
+        log.error(f"DB ERROR (get_client_role_by_chat_id): {e}")
+        return None
+
+@run_in_executor
+def get_clients_monitoring_source(source_id):
+    """Находит всех клиентов, которые мониторят данный источник. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    c.client_id, 
+                    c.control_chat_id, 
+                    c.target_chat_id,
+                    c.name 
+                FROM clients c
+                JOIN sources s ON c.control_chat_id = s.control_chat_id
+                WHERE s.source_chat_id = ? AND c.is_active = 1
+            """, (source_id,))
+            
+            return [{'id': row[0], 'control_id': row[1], 'target_id': row[2], 'name': row[3]} for row in cursor.fetchall()]
+    except Exception as e:
+        log.error(f"DB ERROR (get_clients_monitoring_source): {e}")
+        return []
+
+
+# ----------------- ФУНКЦИИ КЛЮЧЕВЫХ СЛОВ -----------------
+@run_in_executor
+def get_keywords(control_chat_id, source_chat_id=None):
+    """Получает ключевые слова для конкретного клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            # 1. Запрос глобальных слов (source_chat_id = 0)
+            query = "SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = 0"
+            params = [control_chat_id]
+            
+            # 2. Добавление специфических слов, если source_chat_id указан и не равен 0
+            if source_chat_id is not None and source_chat_id != 0:
+                query += " UNION SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = ?"
+                params.extend([control_chat_id, source_chat_id])
+                
+            cursor.execute(query, params)
+            return [row[0].lower() for row in cursor.fetchall()]
+    except Exception as e:
+        log.error(f"DB ERROR (get_keywords): {e}")
+        return []
+
+@run_in_executor
+def add_keyword(kw, control_chat_id, source_chat_id=0):
+    """Добавляет слово для конкретного клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO keywords (control_chat_id, source_chat_id, keyword) VALUES (?, ?, ?)", 
+                          (control_chat_id, source_chat_id, kw.lower()))
+            conn.commit()
+            return True
+    except sqlite3.IntegrityError:
+        return False
+    except Exception as e:
+        log.error(f"DB ERROR (add_keyword): {e}")
+        return False
+
+@run_in_executor
+def delete_keyword(kw, control_chat_id, source_chat_id=0):
+    """Удаляет слово для конкретного клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM keywords WHERE keyword = ? AND control_chat_id = ? AND source_chat_id = ?", 
+                          (kw.lower(), control_chat_id, source_chat_id))
+            conn.commit()
+            return cursor.rowcount > 0 
+    except Exception as e:
+        log.error(f"DB ERROR (delete_keyword): {e}")
+        return False
+
+# ----------------- ФУНКЦИИ НЕГАТИВНЫХ СЛОВ -----------------
+@run_in_executor
+def get_negwords(control_chat_id):
+    """Получает негативные слова для конкретного клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT negword FROM negwords WHERE control_chat_id = ?", (control_chat_id,))
+            return [row[0].lower() for row in cursor.fetchall()]
+    except Exception as e:
+        log.error(f"DB ERROR (get_negwords): {e}")
+        return []
+
+@run_in_executor
+def add_negword(nw, control_chat_id):
+    """Добавляет негативное слово для конкретного клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO negwords (control_chat_id, negword) VALUES (?, ?)", (control_chat_id, nw.lower()))
+            conn.commit()
+            return True
+    except sqlite3.IntegrityError:
+        return False
+    except Exception as e:
+        log.error(f"DB ERROR (add_negword): {e}")
+        return False
+
+@run_in_executor
+def delete_negword(nw, control_chat_id):
+    """Удаляет негативное слово для конкретного клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM negwords WHERE negword = ? AND control_chat_id = ?", (nw.lower(), control_chat_id))
+            conn.commit()
+            return cursor.rowcount > 0 
+    except Exception as e:
+        log.error(f"DB ERROR (delete_negword): {e}")
+        return False
+
+# ----------------- ФУНКЦИИ ИСТОЧНИКОВ -----------------
+@run_in_executor
+def list_sources(control_chat_id):
+    """Получает список источников, которые мониторит конкретный клиент. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT source_chat_id, chat_title FROM sources WHERE control_chat_id = ?", (control_chat_id,))
+            return cursor.fetchall()
+    except Exception as e:
+        log.error(f"DB ERROR (list_sources): {e}")
+        return []
+
+@run_in_executor
+def add_source(source_chat_id, control_chat_id, chat_title):
+    """Добавляет источник для конкретного клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO sources (source_chat_id, control_chat_id, chat_title) VALUES (?, ?, ?)", 
+                          (source_chat_id, control_chat_id, chat_title))
+            conn.commit()
+            return True
+    except Exception as e:
+        log.error(f"DB ERROR (add_source): {e}")
+        return False
+
+@run_in_executor
+def delete_source(source_chat_id, control_chat_id):
+    """Удаляет источник для конкретного клиента. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM sources WHERE source_chat_id = ? AND control_chat_id = ?", (source_chat_id, control_chat_id))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"DB ERROR (delete_source): {e}")
+        return False
+
+# ----------------- ФУНКЦИИ AI ПРАВИЛ -----------------
+@run_in_executor
+def get_ai_rule(source_chat_id, control_chat_id):
+    """Получает AI правило: сначала специфическое, потом глобальное (source_id = 0). Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            # 1. Поиск специфического правила
+            cursor.execute("SELECT rule FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
+                          (source_chat_id, control_chat_id))
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+                
+            # 2. Поиск ГЛОБАЛЬНОГО правила
+            cursor.execute("SELECT rule FROM ai_rules WHERE source_chat_id = 0 AND control_chat_id = ?", 
+                          (control_chat_id,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+            
+    except Exception as e:
+        log.error(f"DB ERROR (get_ai_rule): {e}")
+        return None
+
+@run_in_executor
+def set_ai_rule(source_chat_id, control_chat_id, rule):
+    """Устанавливает AI правило для конкретного источника или глобально (0). Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO ai_rules (source_chat_id, control_chat_id, rule) VALUES (?, ?, ?)", 
+                          (source_chat_id, control_chat_id, rule))
+            conn.commit()
+    except Exception as e:
+        log.error(f"DB ERROR (set_ai_rule): {e}")
+
+@run_in_executor
+def clear_ai_rule(source_chat_id, control_chat_id):
+    """Удаляет AI правило для конкретного источника или глобально (0). Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
+                          (source_chat_id, control_chat_id))
+            conn.commit()
+    except Exception as e:
+        log.error(f"DB ERROR (clear_ai_rule): {e}")
+
+# ----------------- ГЛОБАЛЬНЫЕ ФУНКЦИИ БЕЗ ПРИВЯЗКИ К КЛИЕНТУ -----------------
+@run_in_executor
+def is_seen(msg_key):
+    """Проверяет, было ли сообщение увидено. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM seen_messages WHERE msg_key = ?", (msg_key,))
+            return cursor.fetchone() is not None
+    except Exception as e:
+        log.error(f"DB ERROR (is_seen): {e}")
+        return False
+
+@run_in_executor
+def mark_seen(msg_key):
+    """Помечает сообщение как увиденное. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO seen_messages (msg_key) VALUES (?)", (msg_key,))
+            conn.commit()
+    except Exception as e:
+        log.error(f"DB ERROR (mark_seen): {e}")
+
+@run_in_executor
+def is_admin(user_id):
+    """Проверяет, является ли пользователь администратором. Добавлен timeout."""
+    if user_id == ADMIN_USER_ID and ADMIN_USER_ID != 0:
+        return True 
+        
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
+            return cursor.fetchone() is not None
+    except Exception as e:
+        log.error(f"DB ERROR (is_admin): {e}")
+        return False
+
+@run_in_executor
+def add_admin(user_id, username):
+    """Добавляет пользователя в список администраторов. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO admins (user_id, username) VALUES (?, ?)", 
+                          (user_id, username))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"DB ERROR (add_admin): {e}")
+        return False
+
+@run_in_executor
+def remove_admin(user_id):
+    """Удаляет пользователя из списка администраторов. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"DB ERROR (remove_admin): {e}")
+        return False
+
+@run_in_executor
+def list_admins():
+    """Возвращает список всех администраторов. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id, username FROM admins")
+            return cursor.fetchall()
+    except Exception as e:
+        log.error(f"DB ERROR (list_admins): {e}")
+        return []
+
+@run_in_executor
+def is_banned(user_id):
+    """Проверяет, забанен ли пользователь. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
+            return cursor.fetchone() is not None
+    except Exception as e:
+        log.error(f"DB ERROR (is_banned): {e}")
+        return False
+
+@run_in_executor
+def ban_user(user_id):
+    """Банит пользователя. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)", (user_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"DB ERROR (ban_user): {e}")
+        return False
+
+@run_in_executor
+def unban_user(user_id):
+    """Разбанивает пользователя. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"DB ERROR (unban_user): {e}")
+        return False
+
+@run_in_executor
+def list_banned_users():
+    """Возвращает список забаненных. Добавлен timeout."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM banned_users")
+            return [row[0] for row in cursor.fetchall()]
+    except Exception as e:
+        log.error(f"DB ERROR (list_banned_users): {e}")
+        return []
+
+# ----------------- ФУНКЦИИ ЛОГИРОВАНИЯ ДЛЯ /почему и /бан -----------------
+# **# ИСПРАВЛЕНИЕ: Добавлен control_chat_id в store_forward_log**
+@run_in_executor
+def store_forward_log(target_msg_id, source_chat_id, control_chat_id, ai_log, reason):
+    """Сохраняет ID пересланного сообщения, ID источника, control_chat_id, лог AI и причину."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO forward_reasons (target_msg_id, source_chat_id, control_chat_id, log_entry, reason) 
+                VALUES (?, ?, ?, ?, ?)""", 
+                (target_msg_id, source_chat_id, control_chat_id, ai_log, reason)
+            )
+            conn.commit()
+    except Exception as e:
+        log.error(f"DB ERROR (store_forward_log): {e}")
+
+@run_in_executor
+def get_source_data_by_forwarded_id(target_msg_id):
+    """Получает source_chat_id, control_chat_id и лог AI по ID сообщения в control_chat."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+            cursor = conn.cursor()
+            # **# ИСПРАВЛЕНИЕ: Добавлен control_chat_id в выборку**
+            cursor.execute("SELECT source_chat_id, control_chat_id, log_entry FROM forward_reasons WHERE target_msg_id = ?", (target_msg_id,))
+            row = cursor.fetchone()
+            if row:
+                # log_entry - это весь лог, который мы записали (включая причину KW)
+                return {'source_id': row[0], 'control_id': row[1], 'log_entry': row[2]} 
+            return None
+    except Exception as e:
+        log.error(f"DB ERROR (get_source_data_by_forwarded_id): {e}")
+        return None
+# --------------------------------------------------------------------------
+
+
+# ----------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ -----------------
+def get_display_name(entity):
+    if hasattr(entity, 'title'):
+        return entity.title
+    name = getattr(entity, 'first_name', '') or ''
+    last = getattr(entity, 'last_name', '') or ''
+    return f"{name} {last}".strip() or str(entity.id)
+
+async def get_chat_title(chat_id):
+    """Получает название чата по ID."""
+    try:
+        if chat_id == 0:
+            return "Глобально"
+            
+        entity = await client.get_entity(chat_id)
+        return get_display_name(entity)
+    except Exception:
+        return str(chat_id)
+
+async def get_sender_info(sender_id):
+    """Получает username и ID отправителя."""
+    try:
+        sender = await client.get_entity(sender_id)
+        return {
+            'username': getattr(sender, 'username', None),
+            'id': sender.id
+        }
+    except Exception:
+        return {
+            'username': None,
+            'id': sender_id
+        }
+# ------------------------------------------
+
+
+# ====== AI фильтр ======
+async def ai_filter(text, source_chat_id, control_chat_id):
+    """
+    Отправляет текст сообщения и правило в OpenAI для проверки.
+    """
+    if not OPENAI_API_KEY:
+        return True, "SKIPPED (OPENAI_API_KEY not set)"
+
+    # Используем обновленную функцию, которая ищет глобальное правило, если нет специфического
+    rule = await get_ai_rule(source_chat_id, control_chat_id) 
+    if not rule:
+        return True, "SKIPPED (No AI rule set for this source or globally by client)"
+    
+    try:
+        
+        system_prompt = (
+            f"Ты - строгий фильтр контента. Твоя задача - определить, соответствует ли сообщение следующим правилам: "
+            f"**Правило:** '{rule}' "
+            "Ты должен ответить только одним словом: 'ДА' или 'НЕТ'. "
+            "'ДА' означает, что сообщение СОВЕРШЕННО соответствует правилу и его нужно переслать. "
+            "'НЕТ' означает, что сообщение НЕ соответствует правилу."
+        )
+        
+        response = await openai.ChatCompletion.acreate( 
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Проверь сообщение: '{text}'"},
+            ],
+            temperature=0.0,
+            max_tokens=3 
+        )
+        
+        verdict = response.choices[0].message.content.strip().upper()
+        
+        if "ДА" in verdict:
+            return True, f"AI VERDICT: Passed (ДА). Rule: {rule}"
+        else:
+            return False, f"AI VERDICT: Failed (НЕТ). Rule: {rule}"
+
+    except Exception as e:
+        log.error(f"OpenAI API Error (acreate) for client {control_chat_id}: {e}")
+        return True, f"ERROR (AI API FAILED): {e}"
+
+
+# ---
+
+# ====== БЫСТРЫЕ КОМАНДЫ 'бан' и 'почему' ПО ОТВЕТУ (НОВЫЙ ОБРАБОТЧИК) ======
+# **# ИСПРАВЛЕНИЕ: Теперь проверяет, является ли чат контрольным ИЛИ целевым**
+@client.on(events.NewMessage()) 
+async def on_quick_action(evt: events.NewMessage.Event):
+    chat_id = evt.chat_id
+    
+    # 1. Проверяем роль чата
+    chat_role = await get_client_role_by_chat_id(chat_id)
+    if not chat_role:
+         return
+    
+    # 2. Проверяем, что это ответ на сообщение
+    if not evt.reply_to_msg_id:
+        return
+
+    # 3. Проверяем, что сообщение - это просто 'бан' или 'почему'
+    text_lower = (evt.message.message or "").strip().lower()
+    
+    if text_lower not in ['бан', 'почему']:
+        return
+
+    # 4. Проверяем, является ли отправитель администратором
+    if not await is_admin(evt.sender_id):
+        log.warning(f"Quick command attempt by non-admin: {evt.sender_id} in {chat_id}")
+        return
+        
+    # **# ИСПРАВЛЕНИЕ: Определяем control_chat_id клиента**
+    if chat_role == 'control':
+        client_data = await get_client_by_control(chat_id)
+    else: # chat_role == 'target'
+        client_data = await get_client_by_target(chat_id)
+    
+    if not client_data: return 
+    control_chat_id = client_data['control_id']
+    
+    # Получаем пересланное сообщение, на которое был дан ответ
+    try:
+        replied_msg = await client.get_messages(chat_id, ids=evt.reply_to_msg_id)
+        if not replied_msg: return
+    except Exception as e:
+        log.error(f"Error getting replied message for quick action: {e}")
+        return
+
+    # Получаем данные о пересланном сообщении
+    log_data = await get_source_data_by_forwarded_id(replied_msg.id) 
+        
+    # 5. Обрабатываем команду 'почему'
+    if text_lower == 'почему':
+        if log_data and log_data['control_id'] == control_chat_id: # Проверка, что лог относится к этому клиенту
+            await evt.reply(f"**🤖 АНАЛИЗ AI (Лог):**\n`{log_data['log_entry']}`", parse_mode='md')
+            log.info(f"CMD SUCCESS: Quick 'почему' for client {control_chat_id}")
+        else:
+            await evt.reply("⚠️ Не удалось найти запись AI-анализа для этого сообщения или оно переслано не для вас. Убедитесь, что это сообщение, пересланное ботом.")
+            log.warning(f"CMD FAILED: Quick 'почему' failed to find log for msg {replied_msg.id}")
+
+    # 6. Обрабатываем команду 'бан'
+    elif text_lower == 'бан':
+        if log_data and log_data['control_id'] == control_chat_id:
+            source_chat_id_to_ban = log_data['source_id']
+                
+            if source_chat_id_to_ban and source_chat_id_to_ban != 0:
+                if await delete_source(source_chat_id_to_ban, control_chat_id):
+                    chat_name = await get_chat_title(source_chat_id_to_ban)
+                    await evt.reply(f"✅ Чат **{chat_name}** (ID: `{source_chat_id_to_ban}`) успешно удален из вашего мониторинга (бан).", parse_mode='md')
+                    log.info(f"CMD SUCCESS: Quick 'бан' deleted source {source_chat_id_to_ban} for client {control_chat_id}")
+                else:
+                    await evt.reply(f"⚠️ Чат ID `{source_chat_id_to_ban}` уже был удален или не найден в списке источников.")
+                    log.warning(f"CMD FAILED: Quick 'бан' source {source_chat_id_to_ban} not found/already deleted.")
+            elif source_chat_id_to_ban == 0:
+                await evt.reply("⚠️ Нельзя забанить источник 'Глобально' через ответ на сообщение.", parse_mode='md')
+            else:
+                await evt.reply("⚠️ Не удалось найти исходный чат для бана по этому сообщению. Возможно, запись устарела.")
+        else:
+            await evt.reply("⚠️ Не удалось найти исходный чат для бана по этому сообщению или оно переслано не для вас.")
+
+
+    await asyncio.sleep(0.5)
+
+# ---
+
+
+# ====== ОБРАБОТЧИК ДЛЯ КОМАНД (ТОЛЬКО КОМАНДЫ СО СЛЕШЕМ /) ======
+@client.on(events.NewMessage(pattern=r'^/'))
+async def on_command(evt: events.NewMessage.Event):
+    
+    # 1. Проверяем, главный ли это администратор
+    is_main_admin = await is_admin(evt.sender_id)
+    
+    # 2. Идентифицируем клиента по чату команд
+    client_data = await get_client_by_control(evt.chat_id)
+    
+    # Если это не главный админ, и это не зарегистрированный чат клиента, то игнорируем
+    if not is_main_admin and not client_data:
+        return
+        
+    # Определяем, какой control_chat_id будем использовать
+    if client_data:
+        # Если команда пришла от зарегистрированного клиента
+        control_chat_id = client_data['control_id']
+        target_chat_id = client_data['target_id']
+        is_client_command = True
+    elif is_main_admin:
+        # Если команда от главного админа, но не из зарегистрированного чата, используем его CONTROL_CHAT_ID
+        control_chat_id = CONTROL_CHAT_ID
+        target_chat_id = TARGET_CHAT_ID
+        is_client_command = False
+    else:
+        return 
+
     # Если команда от клиента, то он должен быть админом в списке администраторов (await!)
     if is_client_command and not await is_admin(evt.sender_id):
          await evt.reply("❌ У вас нет прав для управления ботом в этом чате. Обратитесь к главному администратору.")
@@ -817,8 +1601,6 @@ async def on_command(evt: events.NewMessage.Event):
     # КОМАНДЫ КЛИЕНТА (СО СЛЕШЕМ)
     # ====================================================================
     
-    # [УДАЛЕН ФУНКЦИОНАЛ /почему и /бан ИЗ ЭТОГО ОБРАБОТЧИКА, ОН В on_quick_action]
-    
     # /register
     if cmd == "/register":
         if not is_main_admin:
@@ -831,8 +1613,8 @@ async def on_command(evt: events.NewMessage.Event):
         
         try:
             control_id = int(parts[1])
-            target_id = int(parts[2].split(maxsplit=1)[0])
-            name = parts[2].split(maxsplit=1)[1].strip() if len(parts[2].split(maxsplit=1)) > 1 else f"Клиент {control_id}"
+            target_id = int(parts[2]) # **# ИСПРАВЛЕНИЕ: Правильный парсинг ID**
+            name = parts[3].strip() if len(parts) >= 4 else f"Клиент {control_id}" # **# ИСПРАВЛЕНИЕ: Правильный парсинг имени**
             
             # await!)
             if await add_client(control_id, target_id, name):
@@ -855,67 +1637,64 @@ async def on_command(evt: events.NewMessage.Event):
     # /+слово
     elif cmd == "/+слово":
         
-        subcmd = "add"
         command_prefix = cmd
         source_chat_id = 0 
         keyword = None
         remaining_text = text[len(command_prefix):].strip()
 
         if not remaining_text:
-            await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/{cmd.lstrip('/')} [ID] <слово>`", parse_mode='md')
+            await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/{cmd.lstrip('/')} [ID чата] <слово>` или `/{cmd.lstrip('/')} <слово>` (глобально)", parse_mode='md')
             return
         
+        parts_kw = remaining_text.split(maxsplit=1)
+
         try:
-            id_part, keyword_part = remaining_text.split(maxsplit=1)
-            source_chat_id = int(id_part)
-            keyword = keyword_part.strip()
-            
+            # **# ИСПРАВЛЕНИЕ: Более чистый парсинг: если первый аргумент - это числовой ID, используем его**
+            if len(parts_kw) == 2 and (parts_kw[0].startswith('-100') or (parts_kw[0].lstrip('-').isdigit() and int(parts_kw[0]) < 0)):
+                source_chat_id = int(parts_kw[0])
+                keyword = parts_kw[1].strip()
+            else:
+                source_chat_id = 0
+                keyword = remaining_text.strip()
         except ValueError:
             source_chat_id = 0
             keyword = remaining_text.strip()
             
-            try:
-                _ = int(keyword)
-                await evt.reply("⚠️ Неверный формат. Если вы указываете только число, оно должно быть ID, за которым следует ключевое слово.", parse_mode='md')
-                return
-            except ValueError:
-                pass
-
         if not keyword:
             await evt.reply("⚠️ Ключевое слово не может быть пустым.", parse_mode='md')
             return
 
-        if subcmd == "add" and keyword:
-            
-            # await!)
-            if await add_keyword(keyword, control_chat_id, source_chat_id): 
-                chat_name = await get_chat_title(source_chat_id)
-                log.info(f"CMD SUCCESS: Client {control_chat_id} added keyword '{keyword}' for source {source_chat_id}")
-                await evt.reply(f"✓ Добавлено слово **'{keyword}'** для: **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
-            else:
-                chat_name = await get_chat_title(source_chat_id)
-                log.warning(f"CMD CONFLICT: Client {control_chat_id} failed to add keyword '{keyword}' (already exists) for source {source_chat_id}")
-                await evt.reply(f"⚠️ Уже существует: **{keyword}** для {chat_name} [Клиент: `{control_chat_id}`]", parse_mode='md')
+        if await add_keyword(keyword, control_chat_id, source_chat_id): 
+            chat_name = await get_chat_title(source_chat_id)
+            log.info(f"CMD SUCCESS: Client {control_chat_id} added keyword '{keyword}' for source {source_chat_id}")
+            await evt.reply(f"✓ Добавлено слово **'{keyword}'** для: **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
+        else:
+            chat_name = await get_chat_title(source_chat_id)
+            log.warning(f"CMD CONFLICT: Client {control_chat_id} failed to add keyword '{keyword}' (already exists) for source {source_chat_id}")
+            await evt.reply(f"⚠️ Уже существует: **{keyword}** для {chat_name} [Клиент: `{control_chat_id}`]", parse_mode='md')
 
     # /удалить +слово
     elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "+слово":
         
-        subcmd = "del"
         command_prefix = f"{cmd} {parts[1]}"
-        
         source_chat_id = 0 
         keyword = None
         
         remaining_text = text[len(command_prefix):].strip()
 
         if not remaining_text:
-            await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/{command_prefix.lstrip('/')} [ID] <слово>`", parse_mode='md')
+            await evt.reply(f"⚠️ Неверный формат команды. Используйте: `/{command_prefix.lstrip('/')} [ID чата] <слово>`", parse_mode='md')
             return
         
+        parts_kw = remaining_text.split(maxsplit=1)
+        
         try:
-            id_part, keyword_part = remaining_text.split(maxsplit=1)
-            source_chat_id = int(id_part)
-            keyword = keyword_part.strip()
+            if len(parts_kw) == 2 and (parts_kw[0].startswith('-100') or (parts_kw[0].lstrip('-').isdigit() and int(parts_kw[0]) < 0)):
+                source_chat_id = int(parts_kw[0])
+                keyword = parts_kw[1].strip()
+            else:
+                source_chat_id = 0
+                keyword = remaining_text.strip()
         except ValueError:
             source_chat_id = 0
             keyword = remaining_text.strip()
@@ -1124,7 +1903,7 @@ async def on_command(evt: events.NewMessage.Event):
     # /ai (изменена для поддержки глобальных правил)
     elif cmd == "/ai":
         if len(parts) < 2:
-            await evt.reply("Используйте: /ai set <source_chat_id> <правило> ИЛИ /ai set <правило> (Глобально) | /ai show <source_chat_id> | /ai clear <source_chat_id>")
+            await evt.reply("Используйте: /ai set <source_chat_id> <правило> ИЛИ /ai set <правило> (Глобально) | /ai show [source_chat_id] | /ai clear [source_chat_id]")
             return
         
         subcmd = parts[1].lower()
@@ -1138,20 +1917,26 @@ async def on_command(evt: events.NewMessage.Event):
             target_id = 0
             rule_type = "Глобальное"
             
-            # Логика: если 4 части и второй аргумент похож на ID (начинается с -100), то это специфическое
-            if len(parts) == 4 and parts[2].startswith('-100'): 
+            # **# ИСПРАВЛЕНИЕ: Улучшенная логика парсинга для AI set**
+            if len(parts) == 4 and parts[2].strip().startswith('-100'): 
                 try:
-                    target_id = int(parts[2])
+                    target_id = int(parts[2].strip())
                     rule_text = parts[3].strip()
                     rule_type = "Специфическое"
                 except ValueError:
                     await evt.reply("⚠️ Неверный формат ID чата.")
                     return
             
-            # Логика: если 3 части, то это глобальное правило
-            elif len(parts) >= 3 and not parts[2].startswith('-100'): 
+            # Логика: если 3 части, то это глобальное правило, если ID чата не указан
+            elif len(parts) >= 3: 
                 target_id = 0
-                rule_text = parts[2].strip()
+                # Если ввели /ai set "правило с пробелами"
+                if len(parts) == 3:
+                     rule_text = parts[2].strip()
+                else:
+                    # Если больше 3 частей, то это часть правила, когда ID не указан
+                    rule_text = " ".join(parts[2:]).strip()
+                
                 rule_type = "Глобальное"
             else:
                 await evt.reply("Формат: `/ai set <source_chat_id> <правило>` ИЛИ `/ai set <правило>` (Глобально)", parse_mode='md')
@@ -1168,7 +1953,7 @@ async def on_command(evt: events.NewMessage.Event):
             log.info(f"CMD SUCCESS: Client {control_chat_id} set {rule_type} AI rule for source {target_id}")
 
                 
-        elif subcmd == "show" and len(parts) >= 2:
+        elif subcmd == "show":
             try:
                 # 0 для глобального, если ID не указан
                 source_chat_id = int(parts[2]) if len(parts) == 3 else 0 
@@ -1185,7 +1970,7 @@ async def on_command(evt: events.NewMessage.Event):
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
                 
-        elif subcmd == "clear" and len(parts) >= 2:
+        elif subcmd == "clear":
             try:
                 source_chat_id = int(parts[2]) if len(parts) == 3 else 0
                 # await!)
@@ -1334,6 +2119,22 @@ async def on_message(evt: events.NewMessage.Event):
     # 1. Проверяем, есть ли вообще клиенты, которые мониторят этот источник (await!)
     monitoring_clients = await get_clients_monitoring_source(source_chat_id)
     
+    # **# ИСПРАВЛЕНИЕ: Добавлен ранний выход для команд. Основной обработчик команд (on_command)
+    # обрабатывает команды со слешем, но on_quick_action (который тоже NewMessage) 
+    # должен быть вызван для команд без слеша, таких как 'бан' и 'почему'.
+    # Здесь мы проверяем, не является ли это командой, чтобы не запускать парсинг
+    # для сообщений, которые мы уже обработали или обработаем позже.**
+    
+    text = (evt.message.message or "").strip()
+    if not text:
+        return
+        
+    # Если это сообщение в контрольном или целевом чате - пропускаем, т.к. оно либо 
+    # команда для on_command, либо 'бан'/'почему' для on_quick_action
+    if await get_client_role_by_chat_id(source_chat_id) in ['control', 'target']:
+        return
+
+
     if not monitoring_clients:
         return
     
@@ -1342,10 +2143,6 @@ async def on_message(evt: events.NewMessage.Event):
     if await is_seen(msg_key):
         return
 
-    text = (evt.message.message or "").strip()
-    if not text:
-        return
-    
     text_lower = text.lower()
     
     # ПРОВЕРКА: Блокировка пользователя (Глобально) (await!)
@@ -1367,12 +2164,12 @@ async def on_message(evt: events.NewMessage.Event):
             continue
             
         match_keywords = False
-        forward_reason = "Ключевое слово не найдено." 
+        kw_match_reason = "Ключевое слово не найдено." 
         
         for kw in keywords:
             if kw in text_lower:
                 match_keywords = True
-                forward_reason = f"Сообщение содержит ключевое слово: **{kw}**"
+                kw_match_reason = f"Сообщение содержит ключевое слово: **{kw}**"
                 break
         
         if not match_keywords:
@@ -1390,6 +2187,12 @@ async def on_message(evt: events.NewMessage.Event):
         
         # Логирование результата AI (для сохранения в БД)
         ai_log_entry = ai_verdict.replace('\n', ' ')
+        
+        # **# ИСПРАВЛЕНИЕ: Формируем полный лог для записи в DB и окончательную причину**
+        full_log_entry = f"KW Reason: {kw_match_reason} | AI Verdict: {ai_log_entry}"
+        forward_reason = f"{kw_match_reason}\nAI Filter Result: {ai_log_entry.replace('AI VERDICT: ', '').replace('SKIPPED ', '(Skipped) ')}"
+
+
         log.info(
             f"AI CHECK for client {control_chat_id} (Source: {source_chat_id}, KW Match): "
             f"Verdict: {ai_verdict} | Msg: {text[:50]}..."
@@ -1402,7 +2205,7 @@ async def on_message(evt: events.NewMessage.Event):
                 chat_title = await get_chat_title(source_chat_id)
                 sender_info = await get_sender_info(evt.message.sender_id)
                 
-                # ИСПРАВЛЕНИЕ: Безопасно получаем имя клиента (устраняет ошибку 'name')
+                # Безопасно получаем имя клиента 
                 client_name = client_data.get('name', f"Клиент {control_chat_id}")
                 
                 # Ссылка на оригинальное сообщение
@@ -1418,10 +2221,7 @@ async def on_message(evt: events.NewMessage.Event):
                 
                 separator = "—" * 20
                 
-                # Форматируем причину пересылки для AI Log
-                if "AI VERDICT" in ai_verdict or "SKIPPED" in ai_verdict:
-                    forward_reason += f"\nAI Filter: {ai_verdict.replace('AI VERDICT: ', '').replace('SKIPPED ', '(Skipped) ')}"
-                    
+                
                 final_text = (
                     f"{header}\n"
                     f"{chat_line}\n"
@@ -1437,8 +2237,9 @@ async def on_message(evt: events.NewMessage.Event):
                     parse_mode='md' 
                 )
                 
-                # Сохраняем log AI и source_chat_id (для команд 'бан'/'почему')
-                await store_forward_log(sent_msg.id, source_chat_id, ai_log_entry, forward_reason)
+                # Сохраняем log AI, source_chat_id и control_chat_id (для команд 'бан'/'почему')
+                # **# ИСПРАВЛЕНИЕ: Используем full_log_entry и сохраняем control_chat_id**
+                await store_forward_log(sent_msg.id, source_chat_id, control_chat_id, full_log_entry, forward_reason)
 
                 log.info(f"✓ FORWARDED to client {control_chat_id} (Source {source_chat_id})") 
                 
@@ -1466,7 +2267,7 @@ async def main():
     if ADMIN_USER_ID != 0:
         admin_info = await get_sender_info(ADMIN_USER_ID)
         # Добавляем или обновляем главного админа
-        await add_admin(ADMIN_USER_ID, admin_info['username'] or "admin") 
+        await add_admin(ADMIN_USER_ID, admin_info.get('username', "admin")) 
         log.info(f"Default admin {ADMIN_USER_ID} ensured.")
     # ----------------------------------------------------
 
