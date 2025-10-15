@@ -17,6 +17,7 @@ load_dotenv()
 API_ID = int(os.getenv("TG_API_ID", "0"))
 API_HASH = os.getenv("TG_API_HASH", "")
 PHONE = os.getenv("TG_PHONE", "")
+# Используйте CONTROL_CHAT_ID и TARGET_CHAT_ID только как запасные или для главного админа
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "0"))
 CONTROL_CHAT_ID = int(os.getenv("CONTROL_CHAT_ID", "0"))
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
@@ -118,9 +119,12 @@ def init_db():
                 username TEXT
             )
         """)
+        # !!! ИЗМЕНЕННАЯ ТАБЛИЦА: Добавлен log_entry !!!
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS forward_reasons (
                 target_msg_id INTEGER PRIMARY KEY,
+                source_chat_id INTEGER NOT NULL,
+                log_entry TEXT,  -- Будет хранить полный лог AI-проверки и причину
                 reason TEXT
             )
         """)
@@ -143,6 +147,7 @@ client = TelegramClient("parser_session", API_ID, API_HASH)
 
 def run_in_executor(func):
     async def wrapper(*args, **kwargs):
+        # Используем asyncio.to_thread для запуска синхронных функций в отдельном потоке
         return await asyncio.to_thread(func, *args, **kwargs)
     return wrapper
 
@@ -171,15 +176,29 @@ def get_client_by_control(control_id):
     conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT control_chat_id, target_chat_id, name FROM clients WHERE control_chat_id = ?", 
+        cursor.execute("SELECT client_id, control_chat_id, target_chat_id, name FROM clients WHERE control_chat_id = ?", 
                       (control_id,))
         row = cursor.fetchone()
         if row:
-            return {'control_id': row[0], 'target_id': row[1], 'name': row[2]}
+            return {'id': row[0], 'control_id': row[1], 'target_id': row[2], 'name': row[3]}
         return None
     except Exception as e:
         log.error(f"DB ERROR (get_client_by_control): {e}")
         return None
+    finally:
+        conn.close()
+
+@run_in_executor
+def is_control_chat(chat_id):
+    """Проверяет, является ли чат чатом управления клиента."""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1 FROM clients WHERE control_chat_id = ?", (chat_id,))
+        return cursor.fetchone() is not None
+    except Exception as e:
+        log.error(f"DB ERROR (is_control_chat): {e}")
+        return False
     finally:
         conn.close()
 
@@ -191,6 +210,7 @@ def get_clients_monitoring_source(source_id):
     try:
         cursor.execute("""
             SELECT 
+                c.client_id, 
                 c.control_chat_id, 
                 c.target_chat_id,
                 c.name 
@@ -199,7 +219,7 @@ def get_clients_monitoring_source(source_id):
             WHERE s.source_chat_id = ? AND c.is_active = 1
         """, (source_id,))
         
-        return [{'control_id': row[0], 'target_id': row[1], 'name': row[2]} for row in cursor.fetchall()]
+        return [{'id': row[0], 'control_id': row[1], 'target_id': row[2], 'name': row[3]} for row in cursor.fetchall()]
     except Exception as e:
         log.error(f"DB ERROR (get_clients_monitoring_source): {e}")
         return []
@@ -214,9 +234,11 @@ def get_keywords(control_chat_id, source_chat_id=None):
     conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
+        # 1. Запрос глобальных слов (source_chat_id = 0)
         query = "SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = 0"
         params = [control_chat_id]
         
+        # 2. Добавление специфических слов, если source_chat_id указан и не равен 0
         if source_chat_id is not None and source_chat_id != 0:
             query += " UNION SELECT keyword FROM keywords WHERE control_chat_id = ? AND source_chat_id = ?"
             params.extend([control_chat_id, source_chat_id])
@@ -359,14 +381,23 @@ def delete_source(source_chat_id, control_chat_id):
 # ----------------- ФУНКЦИИ AI ПРАВИЛ -----------------
 @run_in_executor
 def get_ai_rule(source_chat_id, control_chat_id):
-    """Получает AI правило для конкретного источника и клиента. Добавлен timeout."""
+    """Получает AI правило: сначала специфическое, потом глобальное (source_id = 0). Добавлен timeout."""
     conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
+        # 1. Поиск специфического правила
         cursor.execute("SELECT rule FROM ai_rules WHERE source_chat_id = ? AND control_chat_id = ?", 
                       (source_chat_id, control_chat_id))
         row = cursor.fetchone()
+        if row:
+            return row[0]
+            
+        # 2. Поиск ГЛОБАЛЬНОГО правила
+        cursor.execute("SELECT rule FROM ai_rules WHERE source_chat_id = 0 AND control_chat_id = ?", 
+                      (control_chat_id,))
+        row = cursor.fetchone()
         return row[0] if row else None
+        
     except Exception as e:
         log.error(f"DB ERROR (get_ai_rule): {e}")
         return None
@@ -375,7 +406,7 @@ def get_ai_rule(source_chat_id, control_chat_id):
 
 @run_in_executor
 def set_ai_rule(source_chat_id, control_chat_id, rule):
-    """Устанавливает AI правило для конкретного источника и клиента. Добавлен timeout."""
+    """Устанавливает AI правило для конкретного источника или глобально (0). Добавлен timeout."""
     conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
@@ -389,7 +420,7 @@ def set_ai_rule(source_chat_id, control_chat_id, rule):
 
 @run_in_executor
 def clear_ai_rule(source_chat_id, control_chat_id):
-    """Удаляет AI правило для конкретного источника и клиента. Добавлен timeout."""
+    """Удаляет AI правило для конкретного источника или глобально (0). Добавлен timeout."""
     conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
@@ -432,7 +463,7 @@ def mark_seen(msg_key):
 @run_in_executor
 def is_admin(user_id):
     """Проверяет, является ли пользователь администратором. Добавлен timeout."""
-    if user_id == ADMIN_USER_ID:
+    if user_id == ADMIN_USER_ID and ADMIN_USER_ID != 0:
         return True 
         
     conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -513,7 +544,7 @@ def ban_user(user_id):
     try:
         cursor.execute("INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)", (user_id,))
         conn.commit()
-        return True
+        return cursor.rowcount > 0
     except Exception as e:
         log.error(f"DB ERROR (ban_user): {e}")
         return False
@@ -549,38 +580,44 @@ def list_banned_users():
     finally:
         conn.close()
 
+# ----------------- ФУНКЦИИ ЛОГИРОВАНИЯ ДЛЯ /почему и /бан -----------------
 @run_in_executor
-def store_forward_reason(target_msg_id, reason):
-    """Сохраняет причину пересылки. Добавлен timeout."""
+def store_forward_log(target_msg_id, source_chat_id, ai_log, reason):
+    """Сохраняет ID пересланного сообщения, ID источника, лог AI и причину."""
     conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT OR REPLACE INTO forward_reasons (target_msg_id, reason) VALUES (?, ?)", 
-                      (target_msg_id, reason))
+        cursor.execute("""
+            INSERT OR REPLACE INTO forward_reasons (target_msg_id, source_chat_id, log_entry, reason) 
+            VALUES (?, ?, ?, ?)""", 
+            (target_msg_id, source_chat_id, ai_log, reason)
+        )
         conn.commit()
     except Exception as e:
-        log.error(f"DB ERROR (store_forward_reason): {e}")
+        log.error(f"DB ERROR (store_forward_log): {e}")
     finally:
         conn.close()
 
 @run_in_executor
-def get_forward_reason(target_msg_id):
-    """Получает причину пересылки. Добавлен timeout."""
+def get_source_data_by_forwarded_id(target_msg_id):
+    """Получает source_chat_id и лог AI по ID сообщения в control_chat."""
     conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT reason FROM forward_reasons WHERE target_msg_id = ?", (target_msg_id,))
+        cursor.execute("SELECT source_chat_id, log_entry FROM forward_reasons WHERE target_msg_id = ?", (target_msg_id,))
         row = cursor.fetchone()
-        return row[0] if row else None
+        if row:
+            # log_entry - это весь лог, который мы записали (включая причину KW)
+            return {'source_id': row[0], 'log_entry': row[1]} 
+        return None
     except Exception as e:
-        log.error(f"DB ERROR (get_forward_reason): {e}")
+        log.error(f"DB ERROR (get_source_data_by_forwarded_id): {e}")
         return None
     finally:
         conn.close()
 
 
-# ----------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) -----------------
-# Эти функции не работают с БД, поэтому не нуждаются в декораторе
+# ----------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ -----------------
 def get_display_name(entity):
     if hasattr(entity, 'title'):
         return entity.title
@@ -615,7 +652,7 @@ async def get_sender_info(sender_id):
 # ------------------------------------------
 
 
-# ====== AI фильтр (УНИВЕРСАЛЬНЫЙ МЕТОД ДЛЯ СТАРЫХ ВЕРСИЙ) ======
+# ====== AI фильтр ======
 async def ai_filter(text, source_chat_id, control_chat_id):
     """
     Отправляет текст сообщения и правило в OpenAI для проверки.
@@ -623,9 +660,10 @@ async def ai_filter(text, source_chat_id, control_chat_id):
     if not OPENAI_API_KEY:
         return True, "SKIPPED (OPENAI_API_KEY not set)"
 
+    # Используем обновленную функцию, которая ищет глобальное правило, если нет специфического
     rule = await get_ai_rule(source_chat_id, control_chat_id) 
     if not rule:
-        return True, "SKIPPED (No AI rule set for this chat by client)"
+        return True, "SKIPPED (No AI rule set for this source or globally by client)"
     
     try:
         
@@ -650,9 +688,9 @@ async def ai_filter(text, source_chat_id, control_chat_id):
         verdict = response.choices[0].message.content.strip().upper()
         
         if "ДА" in verdict:
-            return True, f"AI VERDICT: Passed (ДА). Rule: {rule[:30]}..."
+            return True, f"AI VERDICT: Passed (ДА). Rule: {rule}"
         else:
-            return False, f"AI VERDICT: Failed (НЕТ). Rule: {rule[:30]}..."
+            return False, f"AI VERDICT: Failed (НЕТ). Rule: {rule}"
 
     except Exception as e:
         log.error(f"OpenAI API Error (acreate) for client {control_chat_id}: {e}")
@@ -661,221 +699,79 @@ async def ai_filter(text, source_chat_id, control_chat_id):
 
 # ---
 
-
-# ====== Обработка сообщений (КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: ОБРАБОТКА МНОГИХ КЛИЕНТОВ) ======
-@client.on(events.NewMessage())
-async def on_message(evt: events.NewMessage.Event):
-    source_chat_id = evt.chat_id
-
-    # 1. Проверяем, есть ли вообще клиенты, которые мониторят этот источник (await!)
-    monitoring_clients = await get_clients_monitoring_source(source_chat_id)
-    
-    if not monitoring_clients:
-        return
-    
-    # 2. Проверяем базовые условия (для всех клиентов) (await!)
-    msg_key = f"{source_chat_id}:{evt.id}"
-    # Проверяем, был ли ключ отработан в этой сессии ранее (для предотвращения дублирования)
-    if await is_seen(msg_key):
-        return
-
-    text = (evt.message.message or "").strip()
-    if not text:
-        return
-    
-    text_lower = text.lower()
-    
-    # ПРОВЕРКА: Блокировка пользователя (Глобально) (await!)
-    if evt.sender_id and await is_banned(evt.sender_id):
-        log.info(f"✗ Skipped message from banned user: {evt.sender_id} (Global Ban)")
-        return
-
-    # 3. Цикл по каждому клиенту
-    for client_data in monitoring_clients:
-        control_chat_id = client_data['control_id']
-        target_chat_id = client_data['target_id']
-        
-        # 3.1. Фильтрация ключевыми и негативными словами (персонализированная) (await!)
-        keywords = await get_keywords(control_chat_id, source_chat_id) 
-        negwords = await get_negwords(control_chat_id) 
-        
-        if not keywords:
-            log.debug(f"Skipping client {control_chat_id}: No keywords set.")
-            continue
-            
-        match_keywords = False
-        forward_reason = "Ключевое слово не найдено." 
-        
-        for kw in keywords:
-            if kw in text_lower:
-                match_keywords = True
-                forward_reason = f"Сообщение содержит ключевое слово: **{kw}**"
-                break
-        
-        if not match_keywords:
-            continue
-        
-        match_negwords = any(nw in text_lower for nw in negwords)
-
-        if match_negwords:
-            log.info(f"✗ Filtered out for client {control_chat_id} (Negword match): {text[:50]}")
-            continue
-
-        # 3.2. Проверка ИИ (персонализированная)
-        # ----------------------------------------------------------------------------------
-        # 🚨 АКТИВНА ЗАГЛУШКА: AI-ПРОВЕРКА ВЫКЛЮЧЕНА! 🚨
-        # Сообщения с KW Match всегда будут пропускаться.
-        # ----------------------------------------------------------------------------------
-        ai_passed = True 
-        ai_verdict = "AI Filter DISABLED (Passed by Default)"
-        # ai_passed, ai_verdict = await ai_filter(text, source_chat_id, control_chat_id) # Закомментировано
-        
-        # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ РЕЗУЛЬТАТА AI !!!
-        log.info(
-            f"AI CHECK for client {control_chat_id} (Source: {source_chat_id}, KW Match): "
-            f"Verdict: {ai_verdict} | Msg: {text[:50]}..."
-        )
-        # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
-        # ----------------------------------------------------------------------------------
-
-
-        # 3.3. Логика пересылки
-        if ai_passed:
-            try:
-                # Получаем данные (один раз)
-                chat_title = await get_chat_title(source_chat_id)
-                sender_info = await get_sender_info(evt.message.sender_id)
-                
-                # ИСПРАВЛЕНИЕ: Безопасно получаем имя клиента (устраняет ошибку 'name')
-                client_name = client_data.get('name', f"Клиент {control_chat_id}")
-                
-                # Ссылка на оригинальное сообщение
-                channel_id_for_link = str(source_chat_id).replace('-100', '')
-                original_link = f"https://t.me/c/{channel_id_for_link}/{evt.id}"
-
-                # Формируем сообщение
-                header = f"**Монитор Клиента: {client_name}**" 
-                chat_line = f"Чат: [{chat_title}]({original_link})"
-                
-                sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
-                sender_line = f"Отправитель: {sender_display}\nUID: {sender_info['id']}" 
-                
-                separator = "—" * 20
-                
-                if "AI VERDICT" in ai_verdict or "SKIPPED" in ai_verdict:
-                    forward_reason += f"\nAI Filter: {ai_verdict.replace('AI VERDICT: ', '').replace('SKIPPED ', '(Skipped) ')}"
-                    
-                final_text = (
-                    f"{header}\n"
-                    f"{chat_line}\n"
-                    f"{sender_line}\n"
-                    f"{separator}\n\n"
-                    f"{text}" 
-                )
-                
-                sent_msg = await client.send_message(
-                    target_chat_id, 
-                    final_text, 
-                    link_preview=False, 
-                    parse_mode='md' 
-                )
-                
-                # Сохраняем причину (await!)
-                await store_forward_reason(sent_msg.id, forward_reason)
-
-                log.info(f"✓ FORWARDED to client {control_chat_id} (Source {source_chat_id})") 
-                
-            except Exception as e:
-                # ВАЖНО: Логируем подробную ошибку при отправке/форматировании
-                log.error(f"Failed to format or send message for client {control_chat_id} to target {target_chat_id}: {e}")
-                # Если сбой отправки, не отмечаем сообщение как увиденное для других клиентов
-                continue 
-        else:
-            log.info(f"✗ FILTER STOPPED: AI check failed for client {control_chat_id}")
-
-
-    # 4. Отмечаем сообщение как увиденное (Глобально) (await!)
-    # Этот код выполняется только один раз, после успешной обработки для всех клиентов,
-    # что гарантирует, что мы не обработаем сообщение повторно.
-    await mark_seen(msg_key)
-
-    await asyncio.sleep(0.6)
-
-# ---
-
-# ====== БЫСТРАЯ КОМАНДА 'бан' В ЦЕЛЕВОМ ЧАТЕ (TARGET_CHAT_ID) ======
-@client.on(events.NewMessage(chats=TARGET_CHAT_ID)) 
-async def on_quick_ban(evt: events.NewMessage.Event):
-    # Эта команда пока работает только в старом TARGET_CHAT_ID (главного клиента)
-    
-    if evt.chat_id != TARGET_CHAT_ID:
+# ====== БЫСТРЫЕ КОМАНДЫ 'бан' и 'почему' ПО ОТВЕТУ (НОВЫЙ ОБРАБОТЧИК) ======
+# Этот обработчик проверяет все чаты, которые являются 'control_chat'
+@client.on(events.NewMessage()) 
+async def on_quick_action(evt: events.NewMessage.Event):
+    # 1. Проверяем, что это чат управления клиента
+    is_control = await is_control_chat(evt.chat_id)
+    if not is_control:
          return
+    
+    # 2. Проверяем, что это ответ на сообщение
+    if not evt.reply_to_msg_id:
+        return
 
-    if (evt.message.message or "").strip().lower() != 'бан':
+    # 3. Проверяем, что сообщение - это просто 'бан' или 'почему'
+    text_lower = (evt.message.message or "").strip().lower()
+    
+    if text_lower not in ['бан', 'почему']:
+        return
+
+    # 4. Проверяем, является ли отправитель администратором (Ваше требование)
+    if not await is_admin(evt.sender_id):
+        log.warning(f"Quick command attempt by non-admin: {evt.sender_id} in {evt.chat_id}")
         return
         
-    # Важно: тут проверяем админа ГЛОБАЛЬНО (await!)
-    if not await is_admin(evt.sender_id):
-        return
-    
-    if not evt.reply_to_msg_id:
-        await evt.reply("Используйте 'бан', ответив на пересланное ботом сообщение.", parse_mode='md')
-        return
+    # Получаем данные клиента
+    client_data = await get_client_by_control(evt.chat_id)
+    if not client_data: return 
 
+    control_chat_id = client_data['control_id']
+    
+    # Получаем пересланное сообщение, на которое был дан ответ
     try:
         replied_msg = await client.get_messages(evt.chat_id, ids=evt.reply_to_msg_id)
-        text_to_search = replied_msg.message or ""
-        match = re.search(r'UID: (\d+)', text_to_search)
-        
-        if not match:
-            await evt.reply("⚠️ Не удалось найти ID пользователя (`UID: <ID>`) в тексте этого сообщения. Проверьте форматирование.", parse_mode='md')
-            return
-
-        user_id_to_ban = int(match.group(1))
-
-        # await!)
-        if await ban_user(user_id_to_ban): 
-            try:
-                entity = await client.get_entity(user_id_to_ban)
-                ban_name = get_display_name(entity)
-                await evt.reply(f"✅ **Быстрый БАН!** Сообщения от **{ban_name}** (ID: `{user_id_to_ban}`) будут игнорироваться.", parse_mode='md')
-                log.info(f"CMD SUCCESS: Quick banned user {user_id_to_ban}")
-            except Exception:
-                await evt.reply(f"✅ **Быстрый БАН!** Сообщения от ID `{user_id_to_ban}` будут игнорироваться.", parse_mode='md')
-                log.info(f"CMD SUCCESS: Quick banned user {user_id_to_ban} (No Entity)")
-        else:
-            await evt.reply(f"⚠️ Пользователь ID `{user_id_to_ban}` уже был заблокирован.", parse_mode='md')
-            log.warning(f"CMD CONFLICT: Quick ban failed, user {user_id_to_ban} already banned.")
-
+        if not replied_msg: return
     except Exception as e:
-        log.error(f"Error during quick ban: {e}")
-        await evt.reply("❌ Произошла ошибка при попытке бана.", parse_mode='md')
-
-# ---
-
-# ====== ОТДЕЛЬНЫЙ ОБРАБОТЧИК ДЛЯ КОМАНДЫ 'Почему' ======
-@client.on(events.NewMessage(chats=[CONTROL_CHAT_ID, TARGET_CHAT_ID], pattern=r'^/Почему'))
-async def on_command_why(evt: events.NewMessage.Event):
-    
-    # Проверяем админа ГЛОБАЛЬНО (await!)
-    if not await is_admin(evt.sender_id):
+        log.error(f"Error getting replied message for quick action: {e}")
         return
-    
-    if evt.reply_to_msg_id:
-        target_msg_id = evt.reply_to_msg_id
-        # await!)
-        reason = await get_forward_reason(target_msg_id)
-        
-        if reason:
-            await evt.reply(f"🔍 **Причина пересылки**:\n{reason}", parse_mode='md')
+
+    # 5. Обрабатываем команду 'почему'
+    if text_lower == 'почему':
+        log_data = await get_source_data_by_forwarded_id(replied_msg.id) 
+            
+        if log_data:
+            await evt.reply(f"**🤖 АНАЛИЗ AI (Лог):**\n`{log_data['log_entry']}`", parse_mode='md')
+            log.info(f"CMD SUCCESS: Quick 'почему' for client {control_chat_id}")
         else:
-            await evt.reply("⚠️ Не удалось найти причину пересылки для этого сообщения. Убедитесь, что вы отвечаете на сообщение, которое **только что** переслал бот.", parse_mode='md')
-    else:
-        await evt.reply("Используйте /Почему, ответив на пересланное сообщение в этом чате.", parse_mode='md')
+            await evt.reply("⚠️ Не удалось найти запись AI-анализа для этого сообщения. Убедитесь, что это сообщение, пересланное ботом.")
+            log.warning(f"CMD FAILED: Quick 'почему' failed to find log for msg {replied_msg.id}")
+
+    # 6. Обрабатываем команду 'бан'
+    elif text_lower == 'бан':
+        ban_data = await get_source_data_by_forwarded_id(replied_msg.id)
+        source_chat_id_to_ban = ban_data['source_id'] if ban_data else None
+            
+        if source_chat_id_to_ban and source_chat_id_to_ban != 0:
+            if await delete_source(source_chat_id_to_ban, control_chat_id):
+                chat_name = await get_chat_title(source_chat_id_to_ban)
+                await evt.reply(f"✅ Чат **{chat_name}** (ID: `{source_chat_id_to_ban}`) успешно удален из вашего мониторинга (бан).", parse_mode='md')
+                log.info(f"CMD SUCCESS: Quick 'бан' deleted source {source_chat_id_to_ban} for client {control_chat_id}")
+            else:
+                 await evt.reply(f"⚠️ Чат ID `{source_chat_id_to_ban}` уже был удален или не найден в списке источников.")
+                 log.warning(f"CMD FAILED: Quick 'бан' source {source_chat_id_to_ban} not found/already deleted.")
+        elif source_chat_id_to_ban == 0:
+            await evt.reply("⚠️ Нельзя забанить источник 'Глобально' через ответ на сообщение.", parse_mode='md')
+        else:
+            await evt.reply("⚠️ Не удалось найти исходный чат для бана по этому сообщению. Возможно, запись устарела.")
+
+    await asyncio.sleep(0.5)
 
 # ---
 
-# ====== ОСНОВНОЙ ОБРАБОТЧИК КОМАНД ======
+
+# ====== ОБРАБОТЧИК ДЛЯ КОМАНД (ТОЛЬКО КОМАНДЫ СО СЛЕШЕМ /) ======
 @client.on(events.NewMessage(pattern=r'^/'))
 async def on_command(evt: events.NewMessage.Event):
     
@@ -910,7 +806,7 @@ async def on_command(evt: events.NewMessage.Event):
          
     # --- Парсинг команды ---
     text = evt.message.message.strip()
-    parts = text.split(maxsplit=2) 
+    parts = text.split(maxsplit=3) 
     
     if len(parts) < 1:
         return
@@ -918,8 +814,12 @@ async def on_command(evt: events.NewMessage.Event):
     cmd = parts[0].lower()
     
     # ====================================================================
-    # /register (await!)
+    # КОМАНДЫ КЛИЕНТА (СО СЛЕШЕМ)
     # ====================================================================
+    
+    # [УДАЛЕН ФУНКЦИОНАЛ /почему и /бан ИЗ ЭТОГО ОБРАБОТЧИКА, ОН В on_quick_action]
+    
+    # /register
     if cmd == "/register":
         if not is_main_admin:
             await evt.reply("❌ Доступ запрещен. Эту команду может использовать только главный администратор.")
@@ -952,7 +852,7 @@ async def on_command(evt: events.NewMessage.Event):
             await evt.reply(f"❌ Ошибка регистрации: {e}")
             log.error(f"CMD ERROR: Failed to register client: {e}")
             
-    # /+слово (await!)
+    # /+слово
     elif cmd == "/+слово":
         
         subcmd = "add"
@@ -990,18 +890,14 @@ async def on_command(evt: events.NewMessage.Event):
             # await!)
             if await add_keyword(keyword, control_chat_id, source_chat_id): 
                 chat_name = await get_chat_title(source_chat_id)
-                # !!! ЛОГИРОВАНИЕ УСПЕХА !!!
                 log.info(f"CMD SUCCESS: Client {control_chat_id} added keyword '{keyword}' for source {source_chat_id}")
-                # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
                 await evt.reply(f"✓ Добавлено слово **'{keyword}'** для: **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
             else:
                 chat_name = await get_chat_title(source_chat_id)
-                # !!! ЛОГИРОВАНИЕ КОНФЛИКТА/ПОВТОРА !!!
                 log.warning(f"CMD CONFLICT: Client {control_chat_id} failed to add keyword '{keyword}' (already exists) for source {source_chat_id}")
-                # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
                 await evt.reply(f"⚠️ Уже существует: **{keyword}** для {chat_name} [Клиент: `{control_chat_id}`]", parse_mode='md')
 
-    # /удалить +слово (await!)
+    # /удалить +слово
     elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "+слово":
         
         subcmd = "del"
@@ -1031,19 +927,15 @@ async def on_command(evt: events.NewMessage.Event):
         # await!)
         if await delete_keyword(keyword, control_chat_id, source_chat_id): 
             chat_name = await get_chat_title(source_chat_id)
-            # !!! ЛОГИРОВАНИЕ УСПЕХА !!!
             log.info(f"CMD SUCCESS: Client {control_chat_id} deleted keyword '{keyword}' for source {source_chat_id}")
-            # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
             await evt.reply(f"✓ Удалено слово **'{keyword}'** для: **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]", parse_mode='md')
         else:
             chat_name = await get_chat_title(source_chat_id)
-            # !!! ЛОГИРОВАНИЕ НЕУДАЧИ !!!
             log.warning(f"CMD FAILED: Client {control_chat_id} failed to delete keyword '{keyword}' (not found) for source {source_chat_id}")
-            # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
             await evt.reply(f"⚠️ Слово **'{keyword}'** не найдено для: {chat_name} [Клиент: `{control_chat_id}`]", parse_mode='md')
 
 
-    # /список слов (await!)
+    # /список слов
     elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "слов":
         
         source_chat_id = 0
@@ -1097,7 +989,7 @@ async def on_command(evt: events.NewMessage.Event):
         log.info(f"CMD SUCCESS: Client {control_chat_id} viewed keyword list for source {source_chat_id}")
 
             
-    # /минус слово (await!)
+    # /минус слово
     elif cmd == "/минус" and len(parts) >= 2 and parts[1].lower() == "слово":
         
         if len(parts) < 3:
@@ -1116,7 +1008,7 @@ async def on_command(evt: events.NewMessage.Event):
             await evt.reply(f"⚠️ Уже существует: {nw} [Клиент: `{control_chat_id}`]")
             log.warning(f"CMD CONFLICT: Client {control_chat_id} failed to add negword '{nw}' (already exists)")
 
-    # /удалить минус слово (await!)
+    # /удалить минус слово
     elif cmd == "/удалить" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слово":
         
         command_prefix = f"{cmd} {parts[1]} {parts[2]}"
@@ -1136,7 +1028,7 @@ async def on_command(evt: events.NewMessage.Event):
             log.warning(f"CMD FAILED: Client {control_chat_id} failed to delete negword '{nw}' (not found)")
 
 
-    # /список минус слов (await!)
+    # /список минус слов
     elif cmd == "/список" and len(parts) >= 3 and parts[1].lower() == "минус" and parts[2].lower() == "слов":
         # await!)
         nws = await get_negwords(control_chat_id) 
@@ -1144,7 +1036,7 @@ async def on_command(evt: events.NewMessage.Event):
         log.info(f"CMD SUCCESS: Client {control_chat_id} viewed negword list")
 
 
-    # /добавить чат (await!)
+    # /добавить чат
     elif cmd == "/добавить" and len(parts) >= 2 and parts[1].lower() == "чат":
         
         if len(parts) < 3:
@@ -1184,7 +1076,7 @@ async def on_command(evt: events.NewMessage.Event):
             await evt.reply(f"⚠️ Ошибка: Не удалось найти чат по ссылке или ID. Возможно, бот не состоит в этом чате. Ошибка: {e}")
             log.error(f"CMD ERROR: Client {control_chat_id} failed to resolve source {chat_input}: {e}")
     
-    # /удалить чат (await!)
+    # /удалить чат
     elif cmd == "/удалить" and len(parts) >= 2 and parts[1].lower() == "чат":
         
         if len(parts) < 3:
@@ -1221,7 +1113,7 @@ async def on_command(evt: events.NewMessage.Event):
                 await evt.reply("⚠️ Не удалось определить ID источника. Используйте ID, @username или ссылку.")
                 log.error(f"CMD ERROR: Client {control_chat_id} failed to determine source ID for {chat_input}")
 
-    # /список чатов (await!)
+    # /список чатов
     elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "чатов":
         # await!)
         sources = await list_sources(control_chat_id) 
@@ -1229,60 +1121,86 @@ async def on_command(evt: events.NewMessage.Event):
                       "\n".join(f"• {title} (ID: `{cid}`)" for cid, title in sources), parse_mode='md')
         log.info(f"CMD SUCCESS: Client {control_chat_id} viewed source list")
     
-    # /ai (await!)
+    # /ai (изменена для поддержки глобальных правил)
     elif cmd == "/ai":
         if len(parts) < 2:
-            await evt.reply("Используйте: /ai set <source_chat_id> <правило> | /ai show <source_chat_id> | /ai clear <source_chat_id>")
+            await evt.reply("Используйте: /ai set <source_chat_id> <правило> ИЛИ /ai set <правило> (Глобально) | /ai show <source_chat_id> | /ai clear <source_chat_id>")
             return
         
         subcmd = parts[1].lower()
-        if subcmd == "set" and len(parts) == 3:
-            
+        
+        if subcmd == "set":
             if not OPENAI_API_KEY:
                 await evt.reply("⚠️ OPENAI_API_KEY не установлен. Правило AI не будет работать.", parse_mode='md')
                 return
+                
+            rule_text = ""
+            target_id = 0
+            rule_type = "Глобальное"
             
-            try:
-                chat_id_and_rule = parts[2].split(maxsplit=1)
-                if len(chat_id_and_rule) < 2:
-                    await evt.reply("Формат: /ai set <source_chat_id> <правило>")
+            # Логика: если 4 части и второй аргумент похож на ID (начинается с -100), то это специфическое
+            if len(parts) == 4 and parts[2].startswith('-100'): 
+                try:
+                    target_id = int(parts[2])
+                    rule_text = parts[3].strip()
+                    rule_type = "Специфическое"
+                except ValueError:
+                    await evt.reply("⚠️ Неверный формат ID чата.")
                     return
-                source_chat_id = int(chat_id_and_rule[0])
-                rule = chat_id_and_rule[1]
+            
+            # Логика: если 3 части, то это глобальное правило
+            elif len(parts) >= 3 and not parts[2].startswith('-100'): 
+                target_id = 0
+                rule_text = parts[2].strip()
+                rule_type = "Глобальное"
+            else:
+                await evt.reply("Формат: `/ai set <source_chat_id> <правило>` ИЛИ `/ai set <правило>` (Глобально)", parse_mode='md')
+                return
+
+            if not rule_text:
+                 await evt.reply("⚠️ Правило не может быть пустым.")
+                 return
+
+            # await!)
+            await set_ai_rule(target_id, control_chat_id, rule_text) 
+            chat_name = await get_chat_title(target_id)
+            await evt.reply(f"✓ **{rule_type}** AI правило установлено для **{chat_name}** (ID: `{target_id}`) [Клиент: `{control_chat_id}`]")
+            log.info(f"CMD SUCCESS: Client {control_chat_id} set {rule_type} AI rule for source {target_id}")
+
                 
-                # await!)
-                await set_ai_rule(source_chat_id, control_chat_id, rule) 
-                
-                await evt.reply(f"✓ AI правило установлено для источника `{source_chat_id}` [Клиент: `{control_chat_id}`]")
-                log.info(f"CMD SUCCESS: Client {control_chat_id} set AI rule for source {source_chat_id}")
-            except ValueError:
-                await evt.reply("⚠️ Неверный формат ID чата")
-                log.warning(f"CMD ERROR: Client {control_chat_id} failed to set AI rule (bad ID)")
-                
-        elif subcmd == "show" and len(parts) == 3:
+        elif subcmd == "show" and len(parts) >= 2:
             try:
-                source_chat_id = int(parts[2])
+                # 0 для глобального, если ID не указан
+                source_chat_id = int(parts[2]) if len(parts) == 3 else 0 
                 # await!)
                 rule = await get_ai_rule(source_chat_id, control_chat_id) 
+                chat_name = await get_chat_title(source_chat_id)
+                rule_type = "Специфическое" if source_chat_id != 0 else "Глобальное"
+                
                 if rule:
-                    await evt.reply(f"AI правило для `{source_chat_id}` [Клиент: `{control_chat_id}`]:\n{rule}")
+                    await evt.reply(f"**{rule_type}** AI правило для **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]:\n`{rule}`", parse_mode='md')
                     log.info(f"CMD SUCCESS: Client {control_chat_id} viewed AI rule for source {source_chat_id}")
                 else:
-                    await evt.reply(f"Нет правила для чата `{source_chat_id}` [Клиент: `{control_chat_id}`]")
+                    await evt.reply(f"Нет **{rule_type}** правила для **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]")
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
                 
-        elif subcmd == "clear" and len(parts) == 3:
+        elif subcmd == "clear" and len(parts) >= 2:
             try:
-                source_chat_id = int(parts[2])
+                source_chat_id = int(parts[2]) if len(parts) == 3 else 0
                 # await!)
                 await clear_ai_rule(source_chat_id, control_chat_id) 
-                await evt.reply(f"✓ AI правило удалено для чата `{source_chat_id}` [Клиент: `{control_chat_id}`]")
+                chat_name = await get_chat_title(source_chat_id)
+                rule_type = "Специфическое" if source_chat_id != 0 else "Глобальное"
+                await evt.reply(f"✓ **{rule_type}** AI правило удалено для чата **{chat_name}** (ID: `{source_chat_id}`) [Клиент: `{control_chat_id}`]")
                 log.info(f"CMD SUCCESS: Client {control_chat_id} cleared AI rule for source {source_chat_id}")
             except ValueError:
                 await evt.reply("⚠️ Неверный формат ID чата")
-                
-    # /owner (await!)
+        
+        else:
+            await evt.reply("Используйте: /ai set <ID> <правило> | /ai show <ID> | /ai clear <ID>")
+
+    # /owner
     elif cmd == "/owner":
         # Команда доступна только главному администратору.
         if not is_main_admin:
@@ -1345,7 +1263,7 @@ async def on_command(evt: events.NewMessage.Event):
             await evt.reply(response, parse_mode='md')
             log.info(f"CMD SUCCESS: Admin list viewed.")
 
-    # /бан (await!)
+    # /бан (банит пользователя по ID)
     elif cmd == "/бан":
         if len(parts) < 2:
             await evt.reply("Используйте: `/бан <ID>` | `/ban remove <ID>` | `/список бан`", parse_mode='md')
@@ -1369,7 +1287,7 @@ async def on_command(evt: events.NewMessage.Event):
         except ValueError:
             await evt.reply("⚠️ Неверный формат ID пользователя. ID должен быть числом.")
 
-    # /ban remove (await!)
+    # /ban remove
     elif cmd == "/ban" and len(parts) >= 2 and parts[1].lower() == "remove":
         if len(parts) < 3:
             await evt.reply("Используйте: `/ban remove <ID>`", parse_mode='md')
@@ -1386,87 +1304,182 @@ async def on_command(evt: events.NewMessage.Event):
                 log.warning(f"CMD FAILED: User {user_id} not found for unban.")
         except ValueError:
             await evt.reply("⚠️ Неверный формат ID пользователя.")
-        
-    # /список бан (await!)
+            
+    # /список бан
     elif cmd == "/список" and len(parts) >= 2 and parts[1].lower() == "бан":
         # await!)
-        banned_ids = await list_banned_users()
-        response = f"🚫 **Заблокированные пользователи** ({len(banned_ids)}):\n\n"
+        banned_users = await list_banned_users()
+        response = f"**🚫 Заблокированные пользователи** ({len(banned_users)}):\n\n"
         
-        if not banned_ids:
-            response += "*(Список пуст)*"
-        else:
-            for uid in banned_ids:
-                try:
-                    entity = await client.get_entity(uid)
-                    response += f"• **{get_display_name(entity)}** (ID: `{uid}`)\n"
-                except Exception:
-                    response += f"• *Неизвестный пользователь* (ID: `{uid}`)\n"
+        for uid in banned_users:
+            try:
+                entity = await client.get_entity(uid)
+                name = get_display_name(entity)
+                response += f"• **{name}** (ID: `{uid}`)\n"
+            except Exception:
+                response += f"• ID: `{uid}` (Не найдено)\n"
+                
+        if not banned_users:
+             response += "Список пуст."
 
         await evt.reply(response, parse_mode='md')
-        log.info(f"CMD SUCCESS: Banned user list viewed.")
-    
-    # /help
-    elif cmd == "/help":
-        response = (
-            "**🤖 Управление Мониторингом (Клиентский режим)**\n\n"
-            "**1. Ключевые слова (привязаны к этому чату):**\n"
-            "• `/+слово <слово>`: Добавить глобальное слово (сработает везде).\n"
-            "• `/+слово <ID> <слово>`: Добавить слово только для конкретного источника.\n"
-            "• `/удалить +слово <слово>`: Удалить глобальное слово.\n"
-            "• `/удалить +слово <ID> <слово>`: Удалить слово для конкретного источника.\n"
-            "• `/список слов [ID]`\n\n"
-            "**2. Исключения (привязаны к этому чату):**\n"
-            "• `/минус слово <слово>`: Добавить негативное слово.\n"
-            "• `/удалить минус слово <слово>`: Удалить негативное слово.\n"
-            "• `/список минус слов`\n\n"
-            "**3. Источники (привязаны к этому чату):**\n"
-            "• `/добавить чат <ID|ссылка>`: Начать мониторинг канала.\n"
-            "• `/удалить чат <ID|ссылка>`: Остановить мониторинг.\n"
-            "• `/список чатов`\n\n"
-            "**4. AI Фильтрация (привязана к этому чату):**\n"
-            "• `/ai set <ID> <правило>`: Установить правило AI для источника.\n"
-            "• `/ai show <ID>` / `/ai clear <ID>`\n\n"
-            "**5. Действия в чате пересылки:**\n"
-            "• Ответьте словом `бан` на сообщение, чтобы заблокировать отправителя.\n"
-            "• Ответьте `/Почему` на пересланное сообщение, чтобы увидеть причину.\n\n"
-            "**6. Глобальное администрирование (Только Главный Админ):**\n"
-            "• `/owner add <ID>` / `/owner remove <ID>` / `/owner list`\n"
-            "• `/бан <ID>` / `/ban remove <ID>` / `/список бан`\n"
-            "• `/register <control_id> <target_id> <Имя>` (Регистрация нового клиента)"
-        )
-        await evt.reply(response, parse_mode='md')
-        log.info(f"CMD SUCCESS: Help viewed by {evt.sender_id}")
+        log.info(f"CMD SUCCESS: Admin {evt.sender_id} viewed banned list.")
 
 
-# ====== Запуск ======
-async def main():
+# ====== ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ (ПАРСЕР) ======
+@client.on(events.NewMessage())
+async def on_message(evt: events.NewMessage.Event):
+    source_chat_id = evt.chat_id
+
+    # 1. Проверяем, есть ли вообще клиенты, которые мониторят этот источник (await!)
+    monitoring_clients = await get_clients_monitoring_source(source_chat_id)
     
-    # 0. Инициализация БД (таблиц)
-    init_db()
-    
-    if API_ID == 0 or not API_HASH:
-        log.error("CRITICAL: API_ID or API_HASH is empty. Check your .env file!")
+    if not monitoring_clients:
         return
-        
-    await client.start(phone=PHONE)
-    me = await client.get_me()
-    log.info(f"✓ Started as {me.id} @ {get_display_name(me)}")
-    log.info(f"📤 Target chat (Legacy): {TARGET_CHAT_ID}")
-    log.info(f"🎛 Control chat (Legacy): {CONTROL_CHAT_ID}")
-    log.info(f"👤 Admin user: {ADMIN_USER_ID}")
     
-    # 1. Зарегистрируем главного клиента (себя) при первом запуске (await!)
-    if CONTROL_CHAT_ID != 0 and TARGET_CHAT_ID != 0:
-         if await add_client(CONTROL_CHAT_ID, TARGET_CHAT_ID, "Главный Админ"):
-             log.info("✓ Legacy client (Main Admin) registered.")
+    # 2. Проверяем базовые условия (для всех клиентов) (await!)
+    msg_key = f"{source_chat_id}:{evt.id}"
+    if await is_seen(msg_key):
+        return
+
+    text = (evt.message.message or "").strip()
+    if not text:
+        return
+    
+    text_lower = text.lower()
+    
+    # ПРОВЕРКА: Блокировка пользователя (Глобально) (await!)
+    if evt.sender_id and await is_banned(evt.sender_id):
+        log.info(f"✗ Skipped message from banned user: {evt.sender_id} (Global Ban)")
+        return
+
+    # 3. Цикл по каждому клиенту
+    for client_data in monitoring_clients:
+        control_chat_id = client_data['control_id']
+        target_chat_id = client_data['target_id']
+        
+        # 3.1. Фильтрация ключевыми и негативными словами (персонализированная) (await!)
+        keywords = await get_keywords(control_chat_id, source_chat_id) 
+        negwords = await get_negwords(control_chat_id) 
+        
+        if not keywords:
+            log.debug(f"Skipping client {control_chat_id}: No keywords set.")
+            continue
+            
+        match_keywords = False
+        forward_reason = "Ключевое слово не найдено." 
+        
+        for kw in keywords:
+            if kw in text_lower:
+                match_keywords = True
+                forward_reason = f"Сообщение содержит ключевое слово: **{kw}**"
+                break
+        
+        if not match_keywords:
+            continue
+        
+        # Проверка негативных слов
+        match_negwords = any(nw in text_lower for nw in negwords)
+
+        if match_negwords:
+            log.info(f"✗ Filtered out for client {control_chat_id} (Negword match): {text[:50]}")
+            continue
+
+        # 3.2. Проверка ИИ (персонализированная)
+        ai_passed, ai_verdict = await ai_filter(text, source_chat_id, control_chat_id)
+        
+        # Логирование результата AI (для сохранения в БД)
+        ai_log_entry = ai_verdict.replace('\n', ' ')
+        log.info(
+            f"AI CHECK for client {control_chat_id} (Source: {source_chat_id}, KW Match): "
+            f"Verdict: {ai_verdict} | Msg: {text[:50]}..."
+        )
+        
+        # 3.3. Логика пересылки
+        if ai_passed:
+            try:
+                # Получаем данные (один раз)
+                chat_title = await get_chat_title(source_chat_id)
+                sender_info = await get_sender_info(evt.message.sender_id)
+                
+                # ИСПРАВЛЕНИЕ: Безопасно получаем имя клиента (устраняет ошибку 'name')
+                client_name = client_data.get('name', f"Клиент {control_chat_id}")
+                
+                # Ссылка на оригинальное сообщение
+                channel_id_for_link = str(source_chat_id).replace('-100', '')
+                original_link = f"https://t.me/c/{channel_id_for_link}/{evt.id}"
+
+                # Формируем сообщение
+                header = f"**Монитор Клиента: {client_name}**" 
+                chat_line = f"Чат: [{chat_title}]({original_link})"
+                
+                sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
+                sender_line = f"Отправитель: {sender_display}\nUID: {sender_info['id']}" 
+                
+                separator = "—" * 20
+                
+                # Форматируем причину пересылки для AI Log
+                if "AI VERDICT" in ai_verdict or "SKIPPED" in ai_verdict:
+                    forward_reason += f"\nAI Filter: {ai_verdict.replace('AI VERDICT: ', '').replace('SKIPPED ', '(Skipped) ')}"
+                    
+                final_text = (
+                    f"{header}\n"
+                    f"{chat_line}\n"
+                    f"{sender_line}\n"
+                    f"{separator}\n\n"
+                    f"{text}" 
+                )
+                
+                sent_msg = await client.send_message(
+                    target_chat_id, 
+                    final_text, 
+                    link_preview=False, 
+                    parse_mode='md' 
+                )
+                
+                # Сохраняем log AI и source_chat_id (для команд 'бан'/'почему')
+                await store_forward_log(sent_msg.id, source_chat_id, ai_log_entry, forward_reason)
+
+                log.info(f"✓ FORWARDED to client {control_chat_id} (Source {source_chat_id})") 
+                
+            except Exception as e:
+                log.error(f"Failed to format or send message for client {control_chat_id} to target {target_chat_id}: {e}")
+                continue 
+        else:
+            log.info(f"✗ FILTER STOPPED: AI check failed for client {control_chat_id}")
+
+
+    # 4. Отмечаем сообщение как увиденное (Глобально) (await!)
+    await mark_seen(msg_key)
+
+    await asyncio.sleep(0.6)
+
+# ---
+async def main():
+    """Основная функция, запускающая бота."""
+    init_db() # Инициализация БД перед стартом клиента
+    await client.start(phone=PHONE)
+    log.info("Bot started and running!")
+    
+    # ----------------------------------------------------
+    # ИНИЦИАЛИЗАЦИЯ АДМИНА
+    if ADMIN_USER_ID != 0:
+        admin_info = await get_sender_info(ADMIN_USER_ID)
+        # Добавляем или обновляем главного админа
+        await add_admin(ADMIN_USER_ID, admin_info['username'] or "admin") 
+        log.info(f"Default admin {ADMIN_USER_ID} ensured.")
+    # ----------------------------------------------------
 
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
     try:
+        # Установка политик для asyncio
+        if os.name == 'nt':  # Windows
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
         asyncio.run(main())
     except KeyboardInterrupt:
-        log.info("Shutting down...")
+        log.info("Bot stopped manually by user.")
     except Exception as e:
-        log.error(f"FATAL ERROR during bot execution: {e}")
+        log.error(f"Main execution error: {e}")
