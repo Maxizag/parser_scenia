@@ -19,7 +19,9 @@ API_HASH = os.getenv("TG_API_HASH", "")
 PHONE = os.getenv("TG_PHONE", "")
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "0"))
 CONTROL_CHAT_ID = int(os.getenv("CONTROL_CHAT_ID", "0"))
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
+ADMIN_USER_IDS = [
+    int(uid) for uid in os.getenv("ADMIN_USER_IDS", "0").split(",") if uid.strip()
+]
 
 # OpenAI API
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -445,7 +447,7 @@ def mark_seen(msg_key):
 @run_in_executor
 def is_admin(user_id):
     """Проверяет, является ли пользователь администратором. Добавлен timeout."""
-    if user_id == ADMIN_USER_ID:
+    if user_id in ADMIN_USER_IDS:
         return True
     conn = sqlite3.connect(DB_FILE, timeout=10)
     cursor = conn.cursor()
@@ -1246,7 +1248,7 @@ async def on_command(evt: events.NewMessage.Event):
         elif subcmd == "remove" and len(parts) == 3:
             try:
                 user_id = int(parts[2])
-                if user_id == ADMIN_USER_ID:
+                if user_id in ADMIN_USER_IDS:
                     await evt.reply("⚠️ Вы не можете удалить из списка главного администратора (из .env).", parse_mode='md')
                     return
                 # await!)
@@ -1262,9 +1264,9 @@ async def on_command(evt: events.NewMessage.Event):
             # await!)
             admins = await list_admins()
             response = f"**👤 Администраторы** ({len(admins)}):\n\n"
-            response += f"**• Главный Администратор** (ID: `{ADMIN_USER_ID}`) *из .env*\n"
+            response += f"**• Главный Администратор** (ID: `{ADMIN_USER_IDS[0]}`) *из .env*\n"
             for uid, username in admins:
-                if uid != ADMIN_USER_ID:
+                if uid not in ADMIN_USER_IDS:
                     response += f"• **{username}** (ID: `{uid}`)\n"
 
             await evt.reply(response, parse_mode='md')
@@ -1375,7 +1377,7 @@ async def main():
     log.info(f"✓ Started as {me.id} @ {get_display_name(me)}")
     log.info(f"📤 Target chat (Legacy): {TARGET_CHAT_ID}")
     log.info(f"🎛 Control chat (Legacy): {CONTROL_CHAT_ID}")
-    log.info(f"👤 Admin user: {ADMIN_USER_ID}")
+    log.info(f"👤 Admin users: {', '.join(str(uid) for uid in ADMIN_USER_IDS)}")
 
     # 1. Зарегистрируем главного клиента (себя) при первом запуске (await!)
     if CONTROL_CHAT_ID != 0 and TARGET_CHAT_ID != 0:
