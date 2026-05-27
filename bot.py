@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 import openai
 from telethon.utils import get_peer_id
-from telethon.tl.types import User, Channel, Chat
+from telethon.tl.types import User, Channel, Chat, MessageMediaWebPage
 import json
 
 # Загрузка переменных окружения из .env файла
@@ -681,40 +681,102 @@ async def ai_filter(text, source_chat_id, control_chat_id):
 # ---
 
 
-# ====== Обработка сообщений (КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: ОБРАБОТКА МНОГИХ КЛИЕНТОВ) ======
-@client.on(events.NewMessage())
-async def on_message(evt: events.NewMessage.Event):
-    source_chat_id = evt.chat_id
+# ====== БУФЕРЫ МЕДИА (альбомы + одиночные фото без подписи) ======
+ALBUM_WAIT_SECONDS = 1.5
+PENDING_MEDIA_WAIT_SECONDS = 30
 
-    # 1. Проверяем, есть ли вообще клиенты, которые мониторят этот источник (await!)
+album_buffer = {}     # grouped_id -> {"messages": [...], "source_chat_id", "sender_id", "task"}
+pending_media = {}    # (source_chat_id, sender_id) -> {"messages": [...], "task"}
+buffer_lock = asyncio.Lock()
+
+
+async def _album_finalize(grouped_id):
+    """Таймер альбома: ждём ~1.5с тишины, потом обрабатываем альбом целиком."""
+    try:
+        await asyncio.sleep(ALBUM_WAIT_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    async with buffer_lock:
+        entry = album_buffer.pop(grouped_id, None)
+    if not entry:
+        return
+
+    messages = entry["messages"]
+    source_chat_id = entry["source_chat_id"]
+    sender_id = entry["sender_id"]
+
+    caption = ""
+    for m in messages:
+        if m.message:
+            caption = m.message.strip()
+            break
+
+    # Если у альбома нет подписи — кладём его в pending_media, ждём следующий текст
+    if not caption:
+        key = (source_chat_id, sender_id)
+        async with buffer_lock:
+            entry_p = pending_media.get(key)
+            if entry_p is None:
+                entry_p = {"messages": list(messages), "task": None}
+                pending_media[key] = entry_p
+            else:
+                entry_p["messages"].extend(messages)
+            if entry_p["task"] and not entry_p["task"].done():
+                entry_p["task"].cancel()
+            entry_p["task"] = asyncio.create_task(_pending_media_expire(key))
+        log.info(f"Album {grouped_id} buffered without caption, waiting for text from sender {sender_id}.")
+        return
+
     monitoring_clients = await get_clients_monitoring_source(source_chat_id)
     if not monitoring_clients:
         return
-    # 2. Проверяем базовые условия (для всех клиентов) (await!)
-    msg_key = f"{source_chat_id}:{evt.id}"
-    # Проверяем, был ли ключ отработан в этой сессии ранее (для предотвращения дублирования)
+
+    await do_forward(
+        source_chat_id=source_chat_id,
+        sender_id=sender_id,
+        text=caption,
+        media_messages=messages,
+        primary_evt_id=messages[0].id,
+        monitoring_clients=monitoring_clients,
+    )
+
+
+async def _pending_media_expire(key):
+    """Таймер ожидания текста после фото без подписи. Истёк → дропаем."""
+    try:
+        await asyncio.sleep(PENDING_MEDIA_WAIT_SECONDS)
+    except asyncio.CancelledError:
+        return
+    async with buffer_lock:
+        entry = pending_media.pop(key, None)
+    if entry:
+        source_chat_id = key[0]
+        for m in entry["messages"]:
+            await mark_seen(f"{source_chat_id}:{m.id}")
+        log.info(f"Pending media for {key} expired, dropped {len(entry['messages'])} item(s).")
+
+
+async def do_forward(source_chat_id, sender_id, text, media_messages, primary_evt_id, monitoring_clients):
+    """Единая точка пересылки: проверяет фильтры и шлёт текст (+ медиа отдельным сообщением)."""
+    if not text:
+        return
+
+    msg_key = f"{source_chat_id}:{primary_evt_id}"
     if await is_seen(msg_key):
         return
 
-    text = (evt.message.message or "").strip()
-    if not text:
-        return
     text_lower = text.lower()
-    # ПРОВЕРКА: Блокировка пользователя (Глобально) (await!)
-    if evt.sender_id and await is_banned(evt.sender_id):
-        log.info(f"✗ Skipped message from banned user: {evt.sender_id} (Global Ban)")
-        return
 
-    # 3. Цикл по каждому клиенту
     for client_data in monitoring_clients:
         control_chat_id = client_data['control_id']
         target_chat_id = client_data['target_id']
-        # 3.1. Фильтрация ключевыми и негативными словами (персонализированная) (await!)
         keywords = await get_keywords(control_chat_id, source_chat_id)
         negwords = await get_negwords(control_chat_id)
         if not keywords:
             log.debug(f"Skipping client {control_chat_id}: No keywords set.")
             continue
+
         match_keywords = False
         forward_reason = "Ключевое слово не найдено."
         for kw in keywords:
@@ -724,78 +786,133 @@ async def on_message(evt: events.NewMessage.Event):
                 break
         if not match_keywords:
             continue
-        match_negwords = any(nw in text_lower for nw in negwords)
-
-        if match_negwords:
+        if any(nw in text_lower for nw in negwords):
             log.info(f"✗ Filtered out for client {control_chat_id} (Negword match): {text[:50]}")
             continue
 
-        # 3.2. Проверка ИИ (персонализированная)
-        # ----------------------------------------------------------------------------------
-        # Сообщения с KW Match всегда будут пропускаться.
-        # ----------------------------------------------------------------------------------
-        ai_passed, ai_verdict = await ai_filter(text, source_chat_id, control_chat_id)
-        # !!! КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЛОГИРОВАНИЕ РЕЗУЛЬТАТА AI !!!
-        log.info(
-            f"AI CHECK for client {control_chat_id} (Source: {source_chat_id}, KW Match): "
-            f"Verdict: {ai_verdict} | Msg: {text[:50]}..."
-        )
-        # !!! КОНЕЦ ИЗМЕНЕНИЯ !!!
-        # ----------------------------------------------------------------------------------
+        try:
+            chat_title = await get_chat_title(source_chat_id)
+            sender_info = await get_sender_info(sender_id)
+            client_name = client_data.get('name', f"Клиент {control_chat_id}")
+            channel_id_for_link = str(source_chat_id).replace('-100', '')
+            original_link = f"https://t.me/c/{channel_id_for_link}/{primary_evt_id}"
 
+            header = f"**Монитор Клиента: {client_name}**"
+            chat_line = f"Чат: [{chat_title}]({original_link})"
+            sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
+            sender_line = f"Отправитель: {sender_display}\nUID: {sender_info['id']}"
+            separator = "—" * 20
+            final_text = (
+                f"{header}\n"
+                f"{chat_line}\n"
+                f"{sender_line}\n"
+                f"{separator}\n\n"
+                f"{text}"
+            )
 
-        # 3.3. Логика пересылки
-        if ai_passed:
-            try:
-                # Получаем данные (один раз)
-                chat_title = await get_chat_title(source_chat_id)
-                sender_info = await get_sender_info(evt.message.sender_id)
-                # ИСПРАВЛЕНИЕ: Безопасно получаем имя клиента (устраняет ошибку 'name')
-                client_name = client_data.get('name', f"Клиент {control_chat_id}")
-                # Ссылка на оригинальное сообщение
-                channel_id_for_link = str(source_chat_id).replace('-100', '')
-                original_link = f"https://t.me/c/{channel_id_for_link}/{evt.id}"
+            reply_to_id = None
+            if media_messages:
+                media_files = [m.media for m in media_messages]
+                if len(media_files) == 1:
+                    media_files = media_files[0]
+                sent_media = await client.send_file(target_chat_id, media_files)
+                reply_to_id = sent_media[0].id if isinstance(sent_media, list) else sent_media.id
 
-                # Формируем сообщение
-                header = f"**Монитор Клиента: {client_name}**"
-                chat_line = f"Чат: [{chat_title}]({original_link})"
-                sender_display = f"@{sender_info['username']}" if sender_info['username'] else f"ID {sender_info['id']}"
-                sender_line = f"Отправитель: {sender_display}\nUID: {sender_info['id']}"
-                separator = "—" * 20
-                if "AI VERDICT" in ai_verdict or "SKIPPED" in ai_verdict:
-                    forward_reason += f"\nAI Filter: {ai_verdict.replace('AI VERDICT: ', '').replace('SKIPPED ', '(Skipped) ')}"
-                final_text = (
-                    f"{header}\n"
-                    f"{chat_line}\n"
-                    f"{sender_line}\n"
-                    f"{separator}\n\n"
-                    f"{text}"
-                )
-                sent_msg = await client.send_message(
-                    target_chat_id,
-                    final_text,
-                    link_preview=False,
-                    parse_mode='md'
-                )
-                # Сохраняем причину (await!)
-                await store_forward_reason(sent_msg.id, forward_reason)
+            sent_msg = await client.send_message(
+                target_chat_id,
+                final_text,
+                link_preview=False,
+                parse_mode='md',
+                reply_to=reply_to_id,
+            )
+            await store_forward_reason(sent_msg.id, forward_reason)
+            log.info(f"✓ FORWARDED to client {control_chat_id} (Source {source_chat_id}, Media: {len(media_messages)})")
+        except Exception as e:
+            log.error(f"Failed to format or send message for client {control_chat_id} to target {target_chat_id}: {e}")
+            continue
 
-                log.info(f"✓ FORWARDED to client {control_chat_id} (Source {source_chat_id})")
-            except Exception as e:
-                # ВАЖНО: Логируем подробную ошибку при отправке/форматировании
-                log.error(f"Failed to format or send message for client {control_chat_id} to target {target_chat_id}: {e}")
-                # Если сбой отправки, не отмечаем сообщение как увиденное для других клиентов
-                continue
-        else:
-            log.info(f"✗ FILTER STOPPED: AI check failed for client {control_chat_id}")
-
-
-    # 4. Отмечаем сообщение как увиденное (Глобально) (await!)
-    # Этот код выполняется только один раз, после успешной обработки для всех клиентов,
-    # что гарантирует, что мы не обработаем сообщение повторно.
     await mark_seen(msg_key)
-
+    for m in media_messages:
+        await mark_seen(f"{source_chat_id}:{m.id}")
     await asyncio.sleep(0.6)
+
+
+# ====== Обработка сообщений (КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: ОБРАБОТКА МНОГИХ КЛИЕНТОВ) ======
+@client.on(events.NewMessage())
+async def on_message(evt: events.NewMessage.Event):
+    source_chat_id = evt.chat_id
+
+    monitoring_clients = await get_clients_monitoring_source(source_chat_id)
+    if not monitoring_clients:
+        return
+
+    if evt.sender_id and await is_banned(evt.sender_id):
+        log.info(f"✗ Skipped message from banned user: {evt.sender_id} (Global Ban)")
+        return
+
+    msg = evt.message
+    text = (msg.message or "").strip()
+    has_media = bool(msg.media) and not isinstance(msg.media, MessageMediaWebPage)
+    sender_id = msg.sender_id
+    grouped_id = getattr(msg, 'grouped_id', None)
+
+    # 1. Альбом → копим в album_buffer, ждём 1.5 сек после последнего элемента
+    if has_media and grouped_id:
+        async with buffer_lock:
+            entry = album_buffer.get(grouped_id)
+            if entry is None:
+                entry = {
+                    "messages": [msg],
+                    "source_chat_id": source_chat_id,
+                    "sender_id": sender_id,
+                    "task": None,
+                }
+                album_buffer[grouped_id] = entry
+            else:
+                entry["messages"].append(msg)
+            if entry["task"] and not entry["task"].done():
+                entry["task"].cancel()
+            entry["task"] = asyncio.create_task(_album_finalize(grouped_id))
+        return
+
+    # 2. Одиночное медиа без подписи → ждём текст 30 сек
+    if has_media and not text:
+        key = (source_chat_id, sender_id)
+        async with buffer_lock:
+            entry = pending_media.get(key)
+            if entry is None:
+                entry = {"messages": [msg], "task": None}
+                pending_media[key] = entry
+            else:
+                entry["messages"].append(msg)
+            if entry["task"] and not entry["task"].done():
+                entry["task"].cancel()
+            entry["task"] = asyncio.create_task(_pending_media_expire(key))
+        return
+
+    # 3. Есть текст → возможно приклеить накопленные медиа от этого автора
+    attached_media = []
+    if sender_id is not None:
+        key = (source_chat_id, sender_id)
+        async with buffer_lock:
+            entry = pending_media.pop(key, None)
+            if entry:
+                if entry["task"] and not entry["task"].done():
+                    entry["task"].cancel()
+                attached_media = entry["messages"]
+
+    all_media = list(attached_media)
+    if has_media:
+        all_media.append(msg)
+
+    await do_forward(
+        source_chat_id=source_chat_id,
+        sender_id=sender_id,
+        text=text,
+        media_messages=all_media,
+        primary_evt_id=msg.id,
+        monitoring_clients=monitoring_clients,
+    )
 
 # ---
 
